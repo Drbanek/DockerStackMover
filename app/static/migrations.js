@@ -6,8 +6,10 @@ function migrationDisplaySteps(job){
   if(name==="Persistentní volumes"){
    if(volumeSteps.length)volumeSteps.forEach(s=>out.push(s));
    else if(resultVolumes.length)out.push({name:"Persistentní volumes",state:"ok",message:"Přeneseno "+resultVolumes.length+" · "+resultVolumes.join(", ")});
-   else if(actual.some(s=>s.name==="Snapshot před migrací"&&s.state!=="skipped"))out.push({name:"Persistentní volumes",state:"running",message:"Přenos persistentních volumes probíhá"});
-   else out.push({name:"Persistentní volumes",state:"skipped",message:"Není potřeba · stack nemá persistentní volumes"});
+   else if(actual.some(s=>String(s.name||"").startsWith("Volume: ")))out.push({name:"Persistentní volumes",state:"running",message:"Přenos persistentních volumes probíhá"});
+   else if(byName.get("Snapshot před migrací")&&byName.get("Snapshot před migrací").state==="ok")out.push({name:"Persistentní volumes",state:"pending",message:"Čeká na přenos po dokončení snapshotu"});
+   else if(byName.get("Snapshot před migrací")&&["running","error"].includes(byName.get("Snapshot před migrací").state))out.push({name:"Persistentní volumes",state:"pending",message:"Čeká na dokončení snapshotu"});
+   else out.push({name:"Persistentní volumes",state:"pending",message:"Čeká"});
   }else{
    let step=byName.get(name);
    if(!step&&name==="Snapshot před migrací"&&job.status==="success")step={name:name,state:"skipped",message:"Není potřeba · žádná data ke snapshotu"};
