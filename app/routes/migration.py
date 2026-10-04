@@ -106,7 +106,7 @@ async def migration_worker(job):
                 copy_info = await copy_volume(source_id, source_id, volume["name"], backup_name, snapshot_progress)
                 backup_volumes.append({"source": volume["name"], "backup": backup_name, "transport": copy_info.get("transport","node-local")})
             setting_set("backup:" + backup_id, json.dumps({"id":backup_id,"created_at":utcnow(),"stack":detail["stack"],"volumes":backup_volumes,"domains":detail["domains"],"stack_file":stack_file,"type":"pre-migration-volume-snapshot"}))
-            job_step(job, "Snapshot před migrací", "ok", str(len(backup_volumes)) + " volume snapshot(y) vytvořeny lokálně na zdrojovém NODE · " + backup_id)
+            job_step(job, "Snapshot před migrací", "ok", str(len(backup_volumes)) + " volume snapshot(y) vytvořeny lokálně na zdrojovém NODE · " + backup_id, {"current_mb": total_volume_mb, "total_mb": total_volume_mb, "progress_kind": "snapshot"})
         for volume in detail["volumes"]:
             step_name = "Volume: " + volume["name"]; job_step(job, step_name, "running", "Vytvářím volume na cíli")
             await create_volume(target_id, volume["name"], volume.get("driver") or "local"); created_volumes.append(volume["name"])
@@ -123,7 +123,8 @@ async def migration_worker(job):
                 match = re.search(r"(\d+) MB", current_step.get("message") or "")
                 if match:
                     final_message += " · " + match.group(1) + " MB"
-            job_step(job, step_name, "ok", final_message)
+            final_total_mb = volume_sizes.get(volume["name"], 0)
+            job_step(job, step_name, "ok", final_message, {"current_mb": final_total_mb, "total_mb": final_total_mb, "progress_kind": "transfer"})
         # Persist the exact final Compose sent to Portainer. This is intentionally
         # attached to the migration job so failed target deployments can be diagnosed
         # without guessing which transformation produced the final port bindings.
