@@ -47,7 +47,7 @@ chmod 644 /etc/wireguard/dsm-mgmt.pub
 MGMT_WG_PUBLIC_KEY=$(cat /etc/wireguard/dsm-mgmt.pub)
 
 # Narrow host helper: only accepts a WireGuard public key and IPv4:port endpoint,
-# writes the fixed MGMT address 10.200.0.10/16 and starts wg-dsm.
+# writes the fixed MGMT address 10.200.1.10/16 and starts wg-dsm.
 install -d -m 755 /opt/dockerstackmover-host-tools
 cat >/opt/dockerstackmover-host-tools/configure-mgmt-wireguard <<'DSMHELPER'
 #!/usr/bin/env bash
@@ -59,7 +59,7 @@ ENDPOINT="${2:-}"
 PRIV=$(cat /etc/wireguard/dsm-mgmt.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.0.10/16
+Address = 10.200.1.10/16
 PrivateKey = $PRIV
 
 [Peer]
@@ -71,7 +71,7 @@ EOF
 chmod 600 /etc/wireguard/wg-dsm.conf
 systemctl enable wg-quick@wg-dsm >/dev/null
 systemctl restart wg-quick@wg-dsm
-ip -4 addr show dev wg-dsm | grep -q '10.200.0.10/16'
+ip -4 addr show dev wg-dsm | grep -q '10.200.1.10/16'
 DSMHELPER
 chmod 755 /opt/dockerstackmover-host-tools/configure-mgmt-wireguard
 
