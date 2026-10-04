@@ -177,9 +177,22 @@ async def migration_worker(job):
             job_step(job, "DNS cutover", "ok", "Beze změny · " + reason)
         job["status"] = "success"; job["result"] = {"stack": detail["stack"]["name"], "source": detail["stack"]["endpoint"], "source_endpoint_id": source_id, "source_stack_id": stack_id, "target": target["Name"], "target_endpoint_id": target_id, "target_stack_id": target_stack_id, "volumes": created_volumes, "source_volumes": [v["name"] for v in detail["volumes"]], "source_state": "stopped-retained", "dns_changes": dns_changes, "backup_volumes": backup_volumes if 'backup_volumes' in locals() else []}; persist_job(job)
     except Exception as exc:
-        job["status"] = "rollback"; job["error"] = str(exc); persist_job(job)
+        import traceback
+        error_type = type(exc).__name__
+        error_text = str(exc).strip()
+        error_detail = error_type + (": " + error_text if error_text else ": " + repr(exc))
+        error_traceback = traceback.format_exc()
+        job["status"] = "rollback"
+        job["error"] = error_detail
+        # Keep the traceback in the migration result for diagnostics without
+        # exposing it in the normal UI. persist_job stores result_json.
+        job["result"] = {"diagnostic_traceback": error_traceback}
+        persist_job(job)
         for step in reversed(job["steps"]):
-            if step["state"] == "running": step["state"] = "error"; step["message"] = str(exc); break
+            if step["state"] == "running":
+                step["state"] = "error"
+                step["message"] = error_detail
+                break
         if source_stopped:
             job_step(job, "Rollback zdroje", "running", "Migrace selhala, vracím zdroj do provozu")
             try:
