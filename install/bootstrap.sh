@@ -10,8 +10,8 @@ ask(){ local __v=$1 __p=$2 __d=${3:-}; local x; read -rp "$__p${__d:+ [$__d]}: "
 
 source /etc/os-release
 [[ "${ID:-}" == ubuntu ]] || die "Podporováno je Ubuntu Server."
-say "DockerStackMover v1.13 · Server Bootstrap"
-echo "Adresní pravidla: PORTAINER=.8  PROXY=.9  MGMT=.10  NODE=.11-.29"
+say "DockerStackMover v2.1 · Server Bootstrap"
+echo "Adresní pravidla: CONTROL/MGMT=.9  PROXY=.10  NODE=.11-.29"
 
 DEF_IF=$(ip -4 route show default | awk 'NR==1{print $5}')
 [[ -n "$DEF_IF" ]] || die "Nelze zjistit síťové rozhraní."
@@ -26,23 +26,22 @@ BASE=$(awk -F. '{print $1"."$2"."$3}' <<<"$CUR_IP")
 ask SITE "Označení lokality (např. DC1, DC2, PRAHA, PLZEN)" ""
 [[ -n "$SITE" ]] || die "Označení lokality je povinné."
 SITE=${SITE^^}
-echo "Role: 1=PROXY  2=NODE  3=PORTAINER (MAIN)  4=MGMT (MAIN)"
+echo "Role: 1=PROXY  2=NODE  3=CONTROL/MGMT (MAIN)"
 read -rp "Vyber roli: " ROLE_N
 case "$ROLE_N" in
-  1) ROLE=PROXY; LAST=9; HOSTNAME_NEW="${SITE}-PROXY" ;;
+  1) ROLE=PROXY; LAST=10; HOSTNAME_NEW="${SITE}-PROXY" ;;
   2) ROLE=NODE
      while :; do read -rp "NODE adresa .11-.29: " LAST; [[ "$LAST" =~ ^(1[1-9]|2[0-9])$ ]] && break; echo "Povoleno 11-29."; done
      printf -v NODENO "%02d" $((LAST-10)); HOSTNAME_NEW="${SITE}-NODE${NODENO}" ;;
-  3) ROLE=PORTAINER; LAST=8; HOSTNAME_NEW="${SITE}-PORTAINER" ;;
-  4) ROLE=MGMT; LAST=10; HOSTNAME_NEW="${SITE}-MGMT" ;;
+  3) ROLE=MGMT; LAST=9; HOSTNAME_NEW="${SITE}-MGMT" ;;
   *) die "Neplatná role." ;;
 esac
 TARGET_IP="$BASE.$LAST"
 ask WG_HUB_ENDPOINT "MAIN WireGuard endpoint (host/IP:port)" ""
 ask WG_HUB_PUBKEY "MAIN WireGuard public key" ""
 ask WG_ADDRESS "Management overlay IPv4/CIDR tohoto serveru (např. 10.200.2.11/32)" ""
-ask WG_MAIN_IP "Management overlay IPv4 centrálního Portaineru" "10.200.1.8"
-ask WG_MANAGER_IP "Management overlay IPv4 DockerStackMoveru" "10.200.1.10"
+ask WG_MAIN_IP "Management overlay IPv4 CONTROL/WG HUBu" "10.200.0.1"
+ask WG_MANAGER_IP "Management overlay IPv4 DockerStackMoveru" "10.200.0.1"
 [[ -n "$WG_HUB_ENDPOINT" && -n "$WG_HUB_PUBKEY" && -n "$WG_ADDRESS" ]] || die "WireGuard údaje jsou povinné."
 python3 -c 'import ipaddress,sys; ipaddress.ip_interface(sys.argv[1]); ipaddress.ip_address(sys.argv[2])' "$WG_ADDRESS" "$WG_MAIN_IP" || die "Neplatná management IPv4/CIDR."
 echo
