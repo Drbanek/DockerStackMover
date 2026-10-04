@@ -110,7 +110,7 @@ async def migration_worker(job):
             final_message = "Data přenesena přímo přes " + str(copy_info.get("transport") or planned_transport)
             current_step = next((s for s in job["steps"] if s["name"] == step_name), None)
             if current_step:
-                match = re.search(r"(\\d+) MB", current_step.get("message") or "")
+                match = re.search(r"(\d+) MB", current_step.get("message") or "")
                 if match:
                     final_message += " · " + match.group(1) + " MB"
             job_step(job, step_name, "ok", final_message)
