@@ -346,8 +346,16 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
                     last_error=str(exc)
                 await asyncio.sleep(1)
             if not verified:
-                await remove_container(endpoint_id,container_id)
-                yield ev("health","error","Capacity Agent se nepodařilo ověřit: "+last_error); return
+                # Keep the failed agent container for diagnostics. Removing it here
+                # destroys its state/logs and hides whether :9100 was listening.
+                inspect = await docker_request(endpoint_id, "GET", "/containers/" + container_id + "/json")
+                diag = ""
+                if inspect.status_code == 200:
+                    state = inspect.json().get("State") or {}
+                    diag = " · container running=" + str(bool(state.get("Running"))).lower()
+                    if state.get("Error"):
+                        diag += " · error=" + str(state.get("Error"))[:300]
+                yield ev("health","error","Capacity Agent se nepodařilo ověřit: "+last_error+diag+" · kontejner ponechán pro diagnostiku"); return
             save_endpoint_setting(endpoint_id, True, host_ip, settings.get("site",""), settings.get("public_ip",""),
                                   agent_url, token, settings.get("role","NODE"))
             yield ev("health","done","Capacity Agent odpovídá na 9100")
