@@ -353,28 +353,86 @@ async def create_volume(endpoint_id, name, driver="local"):
         if r.status_code not in (200, 201): raise HTTPException(r.status_code, "Volume create failed: " + r.text)
         return r.json()
 
+async def _run_volume_copy_helper(endpoint_id, name, mounts, command, network_mode=None):
+    helper_image = "alpine:3.22"
+    await ensure_image(endpoint_id, helper_image)
+    host_config = {"Mounts": mounts}
+    if network_mode:
+        host_config["NetworkMode"] = network_mode
+    r = await docker_request(endpoint_id, "POST", "/containers/create", params={"name": name},
+        json={"Image": helper_image, "Cmd": ["sh", "-c", command], "HostConfig": host_config})
+    if r.status_code != 201:
+        raise HTTPException(r.status_code, "Volume helper create failed: " + r.text)
+    return r.json()["Id"]
+
+async def copy_volume_local(endpoint_id, volume_name, target_volume_name):
+    """Copy a volume entirely on one Docker host. No payload traverses Portainer/DSM."""
+    name = "dsm-local-copy-" + uuid.uuid4().hex[:10]
+    cid = None
+    try:
+        cid = await _run_volume_copy_helper(endpoint_id, name, [
+            {"Type": "volume", "Source": volume_name, "Target": "/source", "ReadOnly": True},
+            {"Type": "volume", "Source": target_volume_name, "Target": "/target"},
+        ], "cd /source && tar -cf - . | tar -C /target -xf -")
+        r = await docker_request(endpoint_id, "POST", "/containers/" + cid + "/start", json={})
+        if r.status_code not in (204, 304):
+            raise HTTPException(r.status_code, "Local volume copy start failed: " + r.text)
+        code = await wait_container(endpoint_id, cid, timeout=86400)
+        if code != 0:
+            logs = await docker_request(endpoint_id, "GET", "/containers/" + cid + "/logs", params={"stdout":"1","stderr":"1","tail":"80"})
+            raise RuntimeError("Local volume copy failed (exit " + str(code) + "): " + logs.text[-2000:])
+        return {"mode": "local", "transport": "node-local"}
+    finally:
+        if cid:
+            try: await remove_container(endpoint_id, cid)
+            except Exception: pass
+
+def _endpoint_transfer_ip(endpoint_id, peer_id):
+    settings = get_endpoint_settings()
+    src = settings.get(int(endpoint_id), {})
+    peer = settings.get(int(peer_id), {})
+    same_site = bool(src.get("site")) and str(src.get("site")).strip().upper() == str(peer.get("site") or "").strip().upper()
+    if same_site:
+        return (src.get("lan_ip") or src.get("host_ip") or "").strip(), "LAN"
+    return (src.get("host_ip") or src.get("lan_ip") or "").strip(), "WireGuard"
+
+async def copy_volume_direct(source_id, target_id, volume_name, target_volume_name):
+    """Stream tar directly NODE->NODE. DSM only orchestrates helper containers."""
+    source_ip, network = _endpoint_transfer_ip(source_id, target_id)
+    if not source_ip:
+        raise RuntimeError("Direct volume transfer: source LAN/WireGuard IP is not configured")
+    port = 49152 + secrets.randbelow(1024)
+    src_name = "dsm-send-" + uuid.uuid4().hex[:10]
+    dst_name = "dsm-recv-" + uuid.uuid4().hex[:10]
+    src_id = dst_id = None
+    try:
+        src_id = await _run_volume_copy_helper(source_id, src_name, [
+            {"Type":"volume","Source":volume_name,"Target":"/source","ReadOnly":True}
+        ], "cd /source && tar -cf - . | nc -l -p " + str(port), "host")
+        dst_id = await _run_volume_copy_helper(target_id, dst_name, [
+            {"Type":"volume","Source":target_volume_name,"Target":"/target"}
+        ], "i=0; until nc -z " + source_ip + " " + str(port) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && exit 42; sleep 1; done; nc " + source_ip + " " + str(port) + " | tar -C /target -xf -", "host")
+        r = await docker_request(source_id, "POST", "/containers/" + src_id + "/start", json={})
+        if r.status_code not in (204,304): raise HTTPException(r.status_code, "Source transfer helper start failed: " + r.text)
+        await asyncio.sleep(0.5)
+        r = await docker_request(target_id, "POST", "/containers/" + dst_id + "/start", json={})
+        if r.status_code not in (204,304): raise HTTPException(r.status_code, "Target transfer helper start failed: " + r.text)
+        dst_code = await wait_container(target_id, dst_id, timeout=86400)
+        src_code = await wait_container(source_id, src_id, timeout=86400)
+        if dst_code != 0 or src_code != 0:
+            raise RuntimeError("Direct volume transfer failed: sender exit=" + str(src_code) + ", receiver exit=" + str(dst_code))
+        return {"mode":"direct","transport":network,"source_ip":source_ip,"port":port}
+    finally:
+        for eid,cid in ((source_id,src_id),(target_id,dst_id)):
+            if cid:
+                try: await remove_container(eid,cid)
+                except Exception: pass
+
 async def copy_volume(source_id, target_id, volume_name, target_volume_name=None):
     target_volume_name = target_volume_name or volume_name
-    helper_image = "alpine:3.22"; await ensure_image(source_id, helper_image); await ensure_image(target_id, helper_image)
-    src_name = "dc1-mover-src-" + uuid.uuid4().hex[:10]; dst_name = "dc1-mover-dst-" + uuid.uuid4().hex[:10]; src_id = None; dst_id = None
-    try:
-        r = await docker_request(source_id, "POST", "/containers/create", params={"name": src_name}, json={"Image": helper_image, "Cmd": ["sh", "-c", "true"], "HostConfig": {"Mounts": [{"Type": "volume", "Source": volume_name, "Target": "/volume", "ReadOnly": True}]}})
-        if r.status_code != 201: raise HTTPException(r.status_code, "Source helper create failed: " + r.text)
-        src_id = r.json()["Id"]
-        r = await docker_request(target_id, "POST", "/containers/create", params={"name": dst_name}, json={"Image": helper_image, "Cmd": ["sh", "-c", "true"], "HostConfig": {"Mounts": [{"Type": "volume", "Source": target_volume_name, "Target": "/volume"}]}})
-        if r.status_code != 201: raise HTTPException(r.status_code, "Target helper create failed: " + r.text)
-        dst_id = r.json()["Id"]
-        async with client() as c:
-            async with c.stream("GET", "/api/endpoints/" + str(source_id) + "/docker/containers/" + src_id + "/archive", params={"path": "/volume/."}, timeout=None) as source:
-                if source.status_code != 200:
-                    body = await source.aread(); raise HTTPException(source.status_code, "Volume archive read failed: " + body.decode("utf-8", errors="replace"))
-                async def archive_stream():
-                    async for chunk in source.aiter_bytes(): yield chunk
-                r = await c.put("/api/endpoints/" + str(target_id) + "/docker/containers/" + dst_id + "/archive", params={"path": "/volume"}, content=archive_stream(), headers={**headers, "Content-Type": "application/x-tar"}, timeout=None)
-                if r.status_code != 200: raise HTTPException(r.status_code, "Volume archive restore failed: " + r.text)
-    finally:
-        if src_id: await remove_container(source_id, src_id)
-        if dst_id: await remove_container(target_id, dst_id)
+    if int(source_id) == int(target_id):
+        return await copy_volume_local(source_id, volume_name, target_volume_name)
+    return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name)
 
 async def get_stack_file(stack_id):
     async with client() as c:
