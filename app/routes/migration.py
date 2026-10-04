@@ -84,15 +84,25 @@ async def migration_worker(job):
         if rewritten_ports: collision_message += " · host bind IP: " + source_host_ip + " → " + target_host_ip + " (" + str(rewritten_ports) + "×)"
         job_step(job, "Kontrola kolizí", "ok", collision_message); job_step(job, "Zastavení zdroje", "running", "Zastavuji stack pro konzistentní kopii dat")
         await stop_stack(stack_id, source_id); source_stopped = True; await asyncio.sleep(3); job_step(job, "Zastavení zdroje", "ok", "Zdrojový stack je zastaven")
+        volume_sizes = {}
+        for volume in detail["volumes"]:
+            measured = await volume_size_mb(source_id, volume["name"])
+            volume_sizes[volume["name"]] = int(measured or 0)
+        total_volume_mb = sum(volume_sizes.values())
+        job["volume_sizes_mb"] = volume_sizes
+        job["total_volume_mb"] = total_volume_mb
+        persist_job(job)
         backup_volumes = []
         if setting_get("migration_backup_enabled", "true").lower() == "true" and detail["volumes"]:
-            job_step(job, "Snapshot před migrací", "running", "Vytvářím konzistentní lokální snapshot persistentních volumes")
+            job_step(job, "Snapshot před migrací", "running", "Vytvářím konzistentní lokální snapshot persistentních volumes · celkem " + str(total_volume_mb) + " MB")
             backup_id = uuid.uuid4().hex[:12]
             for volume in detail["volumes"]:
                 backup_name = "dsm-backup-" + backup_id + "-" + volume["name"]
                 await create_volume(source_id, backup_name, volume.get("driver") or "local")
                 async def snapshot_progress(mb, volume_name=volume["name"]):
-                    job_step(job, "Snapshot před migrací", "running", "Lokální snapshot " + volume_name + " · " + str(mb) + " MB")
+                    completed_mb = sum(volume_sizes.get(v["name"], 0) for v in detail["volumes"] if v["name"] != volume_name and any(b["source"] == v["name"] for b in backup_volumes))
+                    overall_mb = completed_mb + mb
+                    job_step(job, "Snapshot před migrací", "running", "Lokální snapshot " + volume_name + " · " + str(overall_mb) + " / " + str(total_volume_mb) + " MB", {"current_mb": overall_mb, "total_mb": total_volume_mb, "progress_kind": "snapshot"})
                 copy_info = await copy_volume(source_id, source_id, volume["name"], backup_name, snapshot_progress)
                 backup_volumes.append({"source": volume["name"], "backup": backup_name, "transport": copy_info.get("transport","node-local")})
             setting_set("backup:" + backup_id, json.dumps({"id":backup_id,"created_at":utcnow(),"stack":detail["stack"],"volumes":backup_volumes,"domains":detail["domains"],"stack_file":stack_file,"type":"pre-migration-volume-snapshot"}))
@@ -103,9 +113,9 @@ async def migration_worker(job):
             source_cfg = get_endpoint_settings().get(int(source_id), {}); target_cfg = get_endpoint_settings().get(int(target_id), {})
             same_site = bool(source_cfg.get("site")) and str(source_cfg.get("site")).strip().upper() == str(target_cfg.get("site") or "").strip().upper()
             planned_transport = "LAN NODE → NODE" if same_site else "WireGuard NODE → NODE"
-            job_step(job, step_name, "running", "Přímý přenos " + planned_transport + " · 0 MB")
+            job_step(job, step_name, "running", "Přímý přenos " + planned_transport + " · 0 / " + str(volume_sizes.get(volume["name"], 0)) + " MB", {"current_mb": 0, "total_mb": volume_sizes.get(volume["name"], 0), "progress_kind": "transfer"})
             async def transfer_progress(mb, current_step=step_name, transport=planned_transport):
-                job_step(job, current_step, "running", "Přímý přenos " + transport + " · " + str(mb) + " MB")
+                job_step(job, current_step, "running", "Přímý přenos " + transport + " · " + str(mb) + " / " + str(volume_sizes.get(current_step.replace("Volume: ", ""), 0)) + " MB", {"current_mb": mb, "total_mb": volume_sizes.get(current_step.replace("Volume: ", ""), 0), "progress_kind": "transfer"})
             copy_info = await copy_volume(source_id, target_id, volume["name"], progress_callback=transfer_progress)
             final_message = "Data přenesena přímo přes " + str(copy_info.get("transport") or planned_transport)
             current_step = next((s for s in job["steps"] if s["name"] == step_name), None)

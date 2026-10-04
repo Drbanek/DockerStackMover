@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.19.2"
+APP_VERSION = "1.20.0"
 import re
 import httpx
 import asyncio
@@ -254,9 +254,10 @@ def new_job(stack_id, target_id):
     if not acquire_stack_lock(stack_id, job_id): raise HTTPException(409, "Tento stack už má aktivní migraci")
     migration_jobs[job_id] = job; persist_job(job); return job
 
-def job_step(job, name, state, message=""):
+def job_step(job, name, state, message="", extra=None):
     existing = next((s for s in job["steps"] if s["name"] == name), None)
     payload = {"name": name, "state": state, "message": message}
+    if extra: payload.update(extra)
     if existing: existing.update(payload)
     else: job["steps"].append(payload)
     persist_job(job)
@@ -364,6 +365,31 @@ async def _run_volume_copy_helper(endpoint_id, name, mounts, command, network_mo
     if r.status_code != 201:
         raise HTTPException(r.status_code, "Volume helper create failed: " + r.text)
     return r.json()["Id"]
+
+async def volume_size_mb(endpoint_id, volume_name):
+    """Return apparent source volume size in MiB before a copy starts."""
+    name = "dsm-size-" + uuid.uuid4().hex[:10]
+    cid = None
+    try:
+        cid = await _run_volume_copy_helper(endpoint_id, name, [
+            {"Type": "volume", "Source": volume_name, "Target": "/source", "ReadOnly": True}
+        ], "du -sm /source | cut -f1")
+        r = await docker_request(endpoint_id, "POST", "/containers/" + cid + "/start", json={})
+        if r.status_code not in (204, 304):
+            return None
+        code = await wait_container(endpoint_id, cid, timeout=300)
+        if code != 0:
+            return None
+        logs = await docker_request(endpoint_id, "GET", "/containers/" + cid + "/logs",
+            params={"stdout": "1", "stderr": "0", "tail": "10"})
+        match = re.search(r"(\d+)", logs.text or "")
+        return int(match.group(1)) if match else None
+    finally:
+        if cid:
+            try:
+                await remove_container(endpoint_id, cid)
+            except Exception:
+                pass
 
 async def _container_path_size_mb(endpoint_id, container_id, path="/target"):
     r = await docker_request(endpoint_id, "POST", "/containers/" + container_id + "/exec",
