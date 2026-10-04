@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.19.1"
 import re
 import httpx
 import asyncio
@@ -396,7 +396,7 @@ def _endpoint_transfer_ip(endpoint_id, peer_id):
         return (src.get("lan_ip") or src.get("host_ip") or "").strip(), "LAN"
     return (src.get("host_ip") or src.get("lan_ip") or "").strip(), "WireGuard"
 
-async def copy_volume_direct(source_id, target_id, volume_name, target_volume_name):
+async def copy_volume_direct(source_id, target_id, volume_name, target_volume_name, progress_callback=None):
     """Stream tar directly NODE->NODE. DSM only orchestrates helper containers."""
     source_ip, network = _endpoint_transfer_ip(source_id, target_id)
     if not source_ip:
@@ -432,11 +432,11 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
                 except Exception:
                     pass
 
-async def copy_volume(source_id, target_id, volume_name, target_volume_name=None):
+async def copy_volume(source_id, target_id, volume_name, target_volume_name=None, progress_callback=None):
     target_volume_name = target_volume_name or volume_name
     if int(source_id) == int(target_id):
         return await copy_volume_local(source_id, volume_name, target_volume_name)
-    return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name)
+    return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name, progress_callback)
 
 async def get_stack_file(stack_id):
     async with client() as c:
