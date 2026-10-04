@@ -310,7 +310,7 @@ async function bootstrapFirstPortainer(){
   document.getElementById("provHubHost").value=result.lan_ip;
   document.getElementById("provHubUser").value=p.ssh_user;
   document.getElementById("provHubEndpoint").value=result.wg_endpoint;
-  await loadAppSettings();await loadEndpointSettings();
+  await loadAppSettings();await loadEndpointSettings();await loadProvisionSites();document.getElementById("provSiteSelect").value=result.site;selectProvisionSite();
  }catch(e){
   const x=document.createElement("div");x.className="error";x.style.marginTop="12px";x.textContent="Bootstrap selhal: "+e.message;state.appendChild(x);
  }finally{b.disabled=false}
