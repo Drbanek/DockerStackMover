@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.18.1"
+APP_VERSION = "1.18.2"
 import re
 import httpx
 import asyncio
