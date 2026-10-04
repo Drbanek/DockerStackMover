@@ -196,8 +196,42 @@ EOF
       echo "============================================================"
 
       # Apply asynchronously so the final instructions reach the terminal
-      # before the old address disappears. Restart DSM after the new IP exists.
-      nohup bash -c "sleep 3; netplan apply; docker compose --env-file /opt/dockerstackmover/.env -f /opt/dockerstackmover/compose.yaml up -d --force-recreate" >/var/log/dockerstackmover-ip-switch.log 2>&1 &
+      # before the old address disappears. Use netplan try first; if the target
+      # address does not appear, restore the original DHCP configuration.
+      cat >/usr/local/sbin/dockerstackmover-ip-switch <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+NETPLAN='$NETPLAN'
+BACKUP='$NETPLAN.dsm-backup'
+IFACE='$IFACE'
+TARGET_IP='$TARGET_IP'
+PREFIX='$PREFIX'
+LOG=/var/log/dockerstackmover-ip-switch.log
+exec >>"\$LOG" 2>&1
+
+sleep 3
+echo "Applying static MGMT address \$TARGET_IP/\$PREFIX on \$IFACE"
+if netplan generate && netplan apply; then
+  for _ in \$(seq 1 15); do
+    if ip -o -4 addr show dev "\$IFACE" | grep -q " \$TARGET_IP/\$PREFIX "; then
+      echo "Target address is active."
+      docker compose --env-file /opt/dockerstackmover/.env -f /opt/dockerstackmover/compose.yaml up -d --force-recreate
+      exit 0
+    fi
+    sleep 1
+  done
+fi
+
+echo "Static address activation failed; restoring DHCP configuration."
+cp -a "\$BACKUP" "\$NETPLAN"
+netplan generate
+netplan apply
+sed -i "s/^MOVER_BIND_IP=.*/MOVER_BIND_IP=$MGMT_IP/" /opt/dockerstackmover/.env
+docker compose --env-file /opt/dockerstackmover/.env -f /opt/dockerstackmover/compose.yaml up -d --force-recreate || true
+exit 1
+EOF
+      chmod 0755 /usr/local/sbin/dockerstackmover-ip-switch
+      nohup /usr/local/sbin/dockerstackmover-ip-switch >/dev/null 2>&1 &
       exit 0
     fi
 
