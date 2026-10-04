@@ -15,7 +15,8 @@ async function login(){loadAppVersion();const error=document.getElementById("log
 async function restoreSession(){try{const r=await fetch("/api/session",{cache:"no-store"});if(!r.ok)return false;const data=await r.json();csrfToken=data.csrf;currentUser=data.user||"";currentPermissions=data.permissions||[];applyLanguage(data.language||"cs");applyPermissions();document.getElementById("loginOverlay").style.display="none";return true}catch(_){return false}}
 let selectedStackId=null;let selectedDetail=null;
 function esc(value){const div=document.createElement("div");div.textContent=value==null?"":String(value);return div.innerHTML}
-async function getJson(url){const response=await fetch(url,{cache:"no-store"});if(!response.ok)throw new Error(await response.text());return response.json()}\nasync function loadAppVersion(){try{const d=await getJson("/health");const el=document.getElementById("appVersion");if(el)el.textContent="v"+d.version}catch(_){}}
+async function getJson(url){const response=await fetch(url,{cache:"no-store"});if(!response.ok)throw new Error(await response.text());return response.json()}
+async function loadAppVersion(){try{const d=await getJson("/health");const el=document.getElementById("appVersion");if(el)el.textContent="v"+d.version}catch(_){}}
 function percent(part,total){if(!total)return 0;return Math.max(0,Math.min(100,part/total*100))}
 
 async function loadReadiness(){
