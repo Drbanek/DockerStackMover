@@ -343,7 +343,7 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
             try:
                 fw=await agent_firewall(endpoint_id)
                 if not fw.get("managed"):
-                    # Portainer Agent is managed from MAIN .8; Capacity Agent from DockerStackMover .10.
+                    # Portainer and DSM are both managed from CONTROL/WG HUB 10.200.0.1.
                     applied=await agent_firewall(endpoint_id,"PUT",{
                         "management_sources":["10.200.0.1"],
                         "management_ports":[9001,9100],
