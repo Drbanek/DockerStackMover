@@ -7,6 +7,30 @@ source /etc/os-release
 [[ "${ID:-}" == "ubuntu" ]] || { echo "DockerStackMover bootstrap supports Ubuntu Server."; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Fresh Ubuntu images often start unattended-upgrades immediately after boot.
+# Wait for apt/dpkg to become available instead of failing the bootstrap.
+wait_for_apt() {
+  local timeout=600
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    if (( waited >= timeout )); then
+      echo "Timed out waiting for apt/dpkg lock after ${timeout}s." >&2
+      return 1
+    fi
+    if (( waited % 10 == 0 )); then
+      echo "Waiting for apt/dpkg lock... (${waited}s)"
+    fi
+    sleep 2
+    ((waited+=2))
+  done
+  dpkg --configure -a
+}
+
+apt_safe() {
+  wait_for_apt
+  apt-get -o DPkg::Lock::Timeout=600 "$@"
+}
 IFACE=$(ip -4 route show default | awk 'NR==1{print $5}')
 CURRENT_CIDR=$(ip -o -4 addr show dev "$IFACE" scope global | awk 'NR==1{print $4}')
 MGMT_IP=${CURRENT_CIDR%/*}
@@ -22,20 +46,20 @@ echo "Detected address: $MGMT_IP/$PREFIX"
 echo "Target MGMT address: $TARGET_IP/$PREFIX"
 
 if ! command -v docker >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y ca-certificates curl
+  apt_safe update
+  apt_safe install -y ca-certificates curl
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" >/etc/apt/sources.list.d/docker.list
-  apt-get update
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_safe update
+  apt_safe install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 systemctl enable --now docker
 
 # CONTROL/MGMT is the central WireGuard HUB. It is not a Site 1 peer.
-apt-get update
-apt-get install -y wireguard
+apt_safe update
+apt_safe install -y wireguard
 install -d -m 700 /etc/wireguard
 if [[ ! -f /etc/wireguard/hub.key ]]; then
   umask 077
