@@ -237,3 +237,13 @@ input:focus,select:focus{outline:2px solid #2563eb55;outline-offset:1px;border-c
 .diskDonut.unavailable .donutVisual{background:#1e293b}
 .nodeFooter{display:flex;justify-content:space-between;align-items:center;margin-top:12px}.nodeFooter span{margin:0}.nodeFooter strong{font-size:13px}
 @media(max-width:700px){.dashboardCardGrid,.nodeCardGrid{grid-template-columns:1fr}.nodeMetrics,.diskDonuts{grid-template-columns:1fr}.stackMeta{grid-template-columns:1fr}.donutVisual{width:64px;height:64px;flex-basis:64px}}
+
+
+/* v1.17 settings navigation */
+.settingsTabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px;padding:6px;background:#0f172a;border:1px solid #1e293b;border-radius:12px}
+.settingsTab{background:transparent;color:#94a3b8;border:0;padding:9px 13px;border-radius:8px;font-weight:600}
+.settingsTab:hover{background:#172033;color:#e2e8f0}.settingsTab.active{background:#2563eb;color:#fff}
+.settingsPage{display:none}.settingsPage.active{display:block}
+.infraReady{align-items:center;justify-content:space-between;gap:18px;padding:13px 14px;background:#0f241c;border:1px solid #166534;border-radius:10px}
+.infraReady strong{display:block;color:#86efac;margin-bottom:3px}
+@media(max-width:700px){.settingsTabs{flex-wrap:nowrap;overflow-x:auto}.settingsTab{white-space:nowrap}.infraReady{align-items:flex-start;flex-direction:column}}
