@@ -12,7 +12,7 @@ import time
 import httpx
 from fastapi import Depends, HTTPException, Request
 
-from ..core import app, current_session, require_csrf, user_permissions, setting_set, save_site
+from ..core import app, current_session, require_csrf, user_permissions, setting_set, save_site, save_portainer_config
 from .provisioning import _ssh, _run
 
 
@@ -130,8 +130,7 @@ exit 51
     except Exception as exc:
         raise HTTPException(502, "Portainer běží, ale automatická inicializace API selhala: " + str(exc))
 
-    setting_set("portainer_url", url)
-    setting_set("portainer_token", api_key, True)
+    save_portainer_config(url, api_key)
     setting_set("main_site", site)
     setting_set("wg_hub_lan_ip", lan_ip)
     setting_set("wg_hub_endpoint", wg_endpoint)
@@ -433,8 +432,7 @@ nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-control-ip-swi
             emit("api", "done", "Portainer API token vytvořen")
 
             emit("save", "running", "Ukládám první infrastrukturu")
-            setting_set("portainer_url", url)
-            setting_set("portainer_token", api_key, True)
+            save_portainer_config(url, api_key)
             setting_set("main_site", site)
             setting_set("wg_hub_lan_ip", lan_ip)
             setting_set("wg_hub_endpoint", wg_endpoint)
