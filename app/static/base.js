@@ -10,7 +10,7 @@ function bindEnterActions(){
  const pwdNew=document.getElementById("pwdNew");
  if(pwdNew&&!pwdNew.dataset.enterBound){pwdNew.dataset.enterBound="1";pwdNew.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();changePassword()}})}
 }
-document.addEventListener("DOMContentLoaded",bindEnterActions);
+document.addEventListener("DOMContentLoaded",()=>{bindEnterActions();loadAppVersion()});
 
 async function login(){loadAppVersion();const error=document.getElementById("loginError");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("loginUser").value,password:document.getElementById("loginPass").value})});const raw=await response.text();if(!response.ok)throw new Error(raw);document.getElementById("loginOverlay").style.display="none";if(!await restoreSession())throw new Error("Session restore failed");if(hasPerm("admin")){await loadEndpointSettings();await loadAppSettings();await loadUsers();await loadUpdateStatus();await loadMaintenance();await loadBackups();await loadProvisionSites()}if(hasPerm("migrations")){await loadStacks();await loadHistory()}if(hasPerm("dashboard_read")){await loadReadiness();await loadCapacity();await loadCluster()}}catch(e){error.textContent="Přihlášení se nezdařilo."}}
 async function restoreSession(){try{const r=await fetch("/api/session",{cache:"no-store"});if(!r.ok)return false;const data=await r.json();csrfToken=data.csrf;currentUser=data.user||"";currentPermissions=data.permissions||[];applyLanguage(data.language||"cs");applyPermissions();document.getElementById("loginOverlay").style.display="none";return true}catch(_){return false}}
