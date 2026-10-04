@@ -100,7 +100,9 @@ async def migration_worker(job):
                 backup_name = "dsm-backup-" + backup_id + "-" + volume["name"]
                 await create_volume(source_id, backup_name, volume.get("driver") or "local")
                 async def snapshot_progress(mb, volume_name=volume["name"]):
-                    job_step(job, "Snapshot před migrací", "running", "Lokální snapshot " + volume_name + " · " + str(mb) + " / " + str(volume_sizes.get(volume_name, 0)) + " MB", {"current_mb": mb, "total_mb": volume_sizes.get(volume_name, 0), "progress_kind": "snapshot"})
+                    completed_mb = sum(volume_sizes.get(v["name"], 0) for v in detail["volumes"] if v["name"] != volume_name and any(b["source"] == v["name"] for b in backup_volumes))
+                    overall_mb = completed_mb + mb
+                    job_step(job, "Snapshot před migrací", "running", "Lokální snapshot " + volume_name + " · " + str(overall_mb) + " / " + str(total_volume_mb) + " MB", {"current_mb": overall_mb, "total_mb": total_volume_mb, "progress_kind": "snapshot"})
                 copy_info = await copy_volume(source_id, source_id, volume["name"], backup_name, snapshot_progress)
                 backup_volumes.append({"source": volume["name"], "backup": backup_name, "transport": copy_info.get("transport","node-local")})
             setting_set("backup:" + backup_id, json.dumps({"id":backup_id,"created_at":utcnow(),"stack":detail["stack"],"volumes":backup_volumes,"domains":detail["domains"],"stack_file":stack_file,"type":"pre-migration-volume-snapshot"}))
