@@ -123,11 +123,15 @@ async function installCapacityAgent(endpointId,button){
 
 async function loadUpdateStatus(){
  const box=document.getElementById("updateState"),btn=document.getElementById("updateButton");if(!box)return;
- try{const d=await getJson("/api/update/status");btn.disabled=!d.helper_available;
+ box.textContent="Kontroluji dostupnou verzi…";if(btn)btn.disabled=true;
+ try{const d=await getJson("/api/update/status");
   let msg="Běžící verze: "+esc(d.version||"neznámá")+" · kanál: GHCR latest";
+  if(d.latest_version){msg+=" · dostupná verze: "+esc(d.latest_version);msg+=d.update_available?" · NOVÁ VERZE JE K DISPOZICI":" · ✓ používáš aktuální verzi"}
+  else if(d.check_error)msg+=" · kontrola latest selhala: "+esc(d.check_error);
   if(!d.helper_available)msg+=" · host update helper není nainstalován";
   if(d.result)msg+=" · poslední stav: "+esc(d.result);
   box.innerHTML=msg;
+  if(btn)btn.disabled=!d.helper_available||!d.update_available;
  }catch(e){box.textContent="Stav aktualizace nelze načíst: "+e.message;if(btn)btn.disabled=true}
 }
 async function runSelfUpdate(){
