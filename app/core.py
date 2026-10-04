@@ -408,7 +408,19 @@ async def copy_volume_local(endpoint_id, volume_name, target_volume_name, progre
         r = await docker_request(endpoint_id, "POST", "/containers/" + cid + "/start", json={})
         if r.status_code not in (204, 304):
             raise HTTPException(r.status_code, "Local volume copy start failed: " + r.text)
-        code = await wait_container(endpoint_id, cid, timeout=86400)
+        progress_task = asyncio.create_task(_watch_copy_progress(endpoint_id, cid, progress_callback))
+        try:
+            code = await wait_container(endpoint_id, cid, timeout=86400)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        if progress_callback:
+            final_mb = await _container_path_size_mb(endpoint_id, cid)
+            if final_mb is not None:
+                await progress_callback(final_mb)
         if code != 0:
             logs = await docker_request(endpoint_id, "GET", "/containers/" + cid + "/logs", params={"stdout":"1","stderr":"1","tail":"80"})
             raise RuntimeError("Local volume copy failed (exit " + str(code) + "): " + logs.text[-2000:])
@@ -450,7 +462,19 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
         r = await docker_request(target_id, "POST", "/containers/" + dst_id + "/start", json={})
         if r.status_code not in (204, 304):
             raise HTTPException(r.status_code, "Target transfer helper start failed: " + r.text)
-        dst_code = await wait_container(target_id, dst_id, timeout=86400)
+        progress_task = asyncio.create_task(_watch_copy_progress(target_id, dst_id, progress_callback))
+        try:
+            dst_code = await wait_container(target_id, dst_id, timeout=86400)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        if progress_callback:
+            final_mb = await _container_path_size_mb(target_id, dst_id)
+            if final_mb is not None:
+                await progress_callback(final_mb)
         src_code = await wait_container(source_id, src_id, timeout=86400)
         if dst_code != 0 or src_code != 0:
             raise RuntimeError("Direct volume transfer failed: sender exit=" + str(src_code) + ", receiver exit=" + str(dst_code))
