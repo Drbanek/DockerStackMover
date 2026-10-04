@@ -357,7 +357,7 @@ docker port portainer_agent 9001/tcp | grep -q 9001"""
 
 
 
-def _site_plan(site, role, lan_ip, name="", reserved=None):
+def _site_plan(site, role, lan_ip, name="", reserved=None, node_suffix=None):
     role = str(role or "NODE").upper()
     if role not in ("NODE","PROXY"):
         raise ValueError("Podporovaná role je NODE nebo PROXY.")
@@ -375,7 +375,17 @@ def _site_plan(site, role, lan_ip, name="", reserved=None):
     else:
         candidates = [x for x in range(11,30) if "10.200.%d.%d"%(site["management_octet"],x) not in used_mgmt]
         if not candidates: raise ValueError("Lokalita nemá volnou NODE management adresu .11-.29.")
-        suffix = candidates[0]
+        if node_suffix not in (None, ""):
+            try: requested_suffix = int(node_suffix)
+            except (TypeError, ValueError): raise ValueError("NODE adresa musí být v rozsahu .11-.29.")
+            if requested_suffix < 11 or requested_suffix > 29:
+                raise ValueError("NODE adresa musí být v rozsahu .11-.29.")
+            requested_mgmt = "10.200.%d.%d" % (site["management_octet"], requested_suffix)
+            if requested_mgmt in used_mgmt:
+                raise ValueError("NODE management adresa .%d už je v lokalitě obsazená." % requested_suffix)
+            suffix = requested_suffix
+        else:
+            suffix = candidates[0]
         generated = site["name"]+"-NODE"+str(suffix-10).zfill(2)
     mgmt = "10.200.%d.%d" % (site["management_octet"], suffix)
     target_lan = str(ipaddress.ip_address(int(net.network_address)+suffix))
@@ -458,7 +468,7 @@ async def provisioning_plan(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     p=await request.json();site=get_site(p.get("site"))
     if not site: raise HTTPException(404,"Lokalita neexistuje.")
-    try: plan=_site_plan(site,p.get("role"),p.get("lan_ip"),p.get("name") or "",p.get("reserved_management_ips") or [])
+    try: plan=_site_plan(site,p.get("role"),p.get("lan_ip"),p.get("name") or "",p.get("reserved_management_ips") or [],p.get("node_suffix"))
     except Exception as exc: raise HTTPException(400,str(exc))
     plan.update({"site":site["name"],"public_ip":site.get("public_ip") or "","ssh_user":site.get("ssh_user") or ""})
     return plan
@@ -466,7 +476,7 @@ async def provisioning_plan(request: Request, session=Depends(require_csrf)):
 def _hydrate_v2_payload(payload):
     site=get_site(payload.get("site"))
     if not site: return payload
-    plan=_site_plan(site,payload.get("role"),payload.get("host") or payload.get("lan_ip"),payload.get("name") or "")
+    plan=_site_plan(site,payload.get("role"),payload.get("host") or payload.get("lan_ip"),payload.get("name") or "",node_suffix=payload.get("node_suffix"))
     p=dict(payload);p.update(plan)
     p["site"]=site["name"];p["public_ip"]=site.get("public_ip") or ""
     p["ssh_user"]=str(p.get("ssh_user") or site.get("ssh_user") or "")
