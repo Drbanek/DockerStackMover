@@ -424,6 +424,20 @@ async def provisioning_discovery(site_name: str, session=Depends(require_permiss
     found=await asyncio.gather(*(check(ip) for ip in net.hosts()))
     return {"site":site,"hosts":[x for x in found if x]}
 
+@app.post("/api/provisioning/identify")
+async def provisioning_identify(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
+    p=await request.json();hosts=p.get("hosts") or [];user=str(p.get("ssh_user") or "").strip();password=str(p.get("ssh_password") or "")
+    if not user or not password: raise HTTPException(400,"Chybí SSH přihlášení.")
+    async def identify(host):
+        def run():
+            c=_ssh(str(host),22,user,password)
+            try: return _run(c,"hostnamectl --static 2>/dev/null || hostname").strip()
+            finally: c.close()
+        try: return {"ip":str(host),"hostname":await asyncio.to_thread(run)}
+        except Exception as exc: return {"ip":str(host),"hostname":"","error":str(exc)}
+    return {"hosts":await asyncio.gather(*(identify(h) for h in hosts[:64]))}
+
 @app.post("/api/provisioning/disks")
 async def provisioning_disks(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
