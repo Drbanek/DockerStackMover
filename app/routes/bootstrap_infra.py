@@ -71,7 +71,7 @@ fi
 PRIV=$(cat /etc/wireguard/hub.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.0.8/16
+Address = 10.200.1.8/16
 ListenPort = 51820
 PrivateKey = $PRIV
 EOF
@@ -141,7 +141,7 @@ exit 51
         "ok": True,
         "site": site,
         "portainer_url": url,
-        "hub_management_ip": "10.200.0.8",
+        "hub_management_ip": "10.200.1.8",
         "hub_public_key": hub_pub,
         "wg_endpoint": wg_endpoint,
         "portainer_admin_user": "admin",
@@ -280,7 +280,7 @@ fi
 PRIV=$(cat /etc/wireguard/hub.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.0.8/16
+Address = 10.200.1.8/16
 ListenPort = 51820
 PrivateKey = $PRIV
 EOF
@@ -296,7 +296,7 @@ systemctl enable --now wg-quick@wg-dsm
             mgmt_pub = os.environ.get("DSM_WG_PUBLIC_KEY", "").strip()
             if not mgmt_pub:
                 raise RuntimeError("MGMT WireGuard není připraven. Aktualizuj MGMT pomocí aktuálního install.sh.")
-            peer_cmd = "wg set wg-dsm peer " + shlex.quote(mgmt_pub) + " allowed-ips 10.200.0.10/32; " + \
+            peer_cmd = "wg set wg-dsm peer " + shlex.quote(mgmt_pub) + " allowed-ips 10.200.1.10/32; " + \
                        "wg-quick save wg-dsm >/dev/null"
             _run(conn, peer_cmd, password)
 
@@ -328,7 +328,7 @@ systemctl enable --now wg-quick@wg-dsm
                 break
             if broker_result != "OK":
                 raise RuntimeError("MGMT WireGuard aktivace selhala: " + (broker_result or "host služba neodpověděla"))
-            emit("wireguard", "done", "WG HUB 10.200.0.8 + MGMT 10.200.0.10 připraveny")
+            emit("wireguard", "done", "WG HUB 10.200.1.8 + MGMT 10.200.1.10 připraveny")
 
             emit("portainer", "running", "Instaluji Portainer Server")
             _run(conn, r"""set -e
@@ -481,7 +481,7 @@ nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-portainer-ip-s
             emit("save", "done", "Infrastruktura uložena")
             return {
                 "ok": True, "site": site, "portainer_url": url,
-                "lan_ip": lan_ip, "hub_management_ip": "10.200.0.8",
+                "lan_ip": lan_ip, "hub_management_ip": "10.200.1.8",
                 "hub_public_key": hub_pub, "wg_endpoint": wg_endpoint,
                 "portainer_admin_user": "admin",
                 "portainer_admin_password": admin_password,

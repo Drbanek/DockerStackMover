@@ -35,7 +35,7 @@ CAPACITY_AGENT_CONTAINER = "dockerstackmover-capacity-agent"
 
 
 async def ensure_mgmt_wireguard():
-    """Ensure the DSM host owns 10.200.0.10 before NODE health checks."""
+    """Ensure the DSM host owns 10.200.1.10 before NODE health checks."""
     hub_pub = (setting_get("wg_hub_public_key", "") or "").strip()
     hub_endpoint = (setting_get("wg_hub_endpoint", "") or "").strip()
     if not hub_pub or not hub_endpoint:
@@ -186,7 +186,7 @@ async def node_readiness(endpoint):
     role = (settings.get("role") or "NONE").upper()
     host_ip, host_ip_source = endpoint_host_ip(endpoint)
     if role == "PORTAINER" and not host_ip:
-        host_ip = (setting_get("wg_hub_lan_ip", "") or "").strip() or "10.200.0.8"
+        host_ip = (setting_get("wg_hub_lan_ip", "") or "").strip() or "10.200.1.8"
         host_ip_source = "wg_hub"
     checks = {
         "docker": {"ok": False, "message": "Docker API unavailable"},
@@ -272,9 +272,9 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
                 yield ev("endpoint","error","Host IP se nepodařilo zjistit."); return
             yield ev("endpoint","done","Endpoint OK · "+host_ip)
 
-            yield ev("mgmt_wireguard","running","Ověřuji/aktivuji MGMT WireGuard 10.200.0.10…")
+            yield ev("mgmt_wireguard","running","Ověřuji/aktivuji MGMT WireGuard 10.200.1.10…")
             await ensure_mgmt_wireguard()
-            yield ev("mgmt_wireguard","done","MGMT WireGuard 10.200.0.10 aktivní")
+            yield ev("mgmt_wireguard","done","MGMT WireGuard 10.200.1.10 aktivní")
 
             yield ev("migration","running","Povoluji endpoint pro migrace…")
             save_endpoint_setting(endpoint_id, True, settings.get("host_ip", ""), settings.get("site", ""),
@@ -362,13 +362,13 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
                 if not fw.get("managed"):
                     # Portainer Agent is managed from MAIN .8; Capacity Agent from DockerStackMover .10.
                     applied=await agent_firewall(endpoint_id,"PUT",{
-                        "management_sources":["10.200.0.8","10.200.0.10"],
+                        "management_sources":["10.200.1.8","10.200.1.10"],
                         "management_ports":[9001,9100],
                         "confirm_timeout":90
                     })
                     txid=applied.get("transaction_id")
                     await asyncio.sleep(1)
-                    # Critical safety check: this request itself traverses 10.200.0.10 -> :9100.
+                    # Critical safety check: this request itself traverses 10.200.1.10 -> :9100.
                     verify=await agent_firewall(endpoint_id)
                     if not verify.get("managed"):
                         raise RuntimeError("Firewall pravidla byla aplikována, ale agent je nehlásí jako spravovaná.")
