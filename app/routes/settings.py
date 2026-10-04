@@ -84,7 +84,7 @@ async def update_status(session=Depends(require_permission("admin"))):
                 headers={"Accept": "text/plain", "User-Agent": "DockerStackMover/" + APP_VERSION},
             )
             response.raise_for_status()
-            match = re.search(r'^APP_VERSION\\s*=\\s*["\\\']([^"\\\']+)["\\\']', response.text, re.MULTILINE)
+            match = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', response.text, re.MULTILINE)
             if not match:
                 raise RuntimeError("Verze nebyla v main nalezena")
             latest_version = match.group(1)
