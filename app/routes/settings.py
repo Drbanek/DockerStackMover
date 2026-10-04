@@ -71,34 +71,31 @@ async def update_status(session=Depends(require_permission("admin"))):
     helper_available = os.path.exists("/host-tools/update-dsm")
     result = ""
     try:
-        if os.path.exists(result_path):
-            result = Path(result_path).read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
-    latest_version = ""
-    check_error = ""
-    try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
-            response = await client.get(
-                "https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/app/core.py",
-                params={"_": str(int(datetime.now(timezone.utc).timestamp()))},
-                headers={"Accept": "text/plain", "Cache-Control": "no-cache", "User-Agent": "DockerStackMover/" + APP_VERSION},
-            )
-            response.raise_for_status()
-            match = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', response.text, re.MULTILINE)
-            if not match:
-                raise RuntimeError("Verze nebyla v main nalezena")
-            latest_version = match.group(1)
-    except Exception as exc:
-        check_error = str(exc)
-    return {
-        "helper_available": helper_available,
-        "result": result,
-        "version": APP_VERSION,
-        "latest_version": latest_version,
-        "update_available": bool(latest_version and tuple(int(x) for x in latest_version.split(".")) > tuple(int(x) for x in APP_VERSION.split("."))),
-        "check_error": check_error,
-    }
+        if os.path.exists(result_path): result = Path(result_path).read_text(encoding="utf-8").strip()
+    except Exception: pass
+    latest_version = ""; check_error = ""
+    urls = [
+        "https://api.github.com/repos/Drbanek/DockerStackMover/contents/app/core.py?ref=main",
+        "https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/app/core.py",
+    ]
+    for url in urls:
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                response = await client.get(url, headers={"Accept":"application/vnd.github.raw+json" if "api.github.com" in url else "text/plain","Cache-Control":"no-cache","User-Agent":"DockerStackMover/"+APP_VERSION})
+                response.raise_for_status()
+                body=response.text
+                if "api.github.com" in url and response.headers.get("content-type","").startswith("application/json"):
+                    import base64
+                    body=base64.b64decode(response.json().get("content","")).decode("utf-8")
+                match=re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']',body,re.MULTILINE)
+                if not match: raise RuntimeError("Verze nebyla v main nalezena")
+                latest_version=match.group(1);check_error="";break
+        except Exception as exc: check_error=str(exc)
+    def ver(v):
+        try: return tuple(int(x) for x in str(v).split("."))
+        except Exception: return (0,)
+    return {"helper_available":helper_available,"result":result,"version":APP_VERSION,"latest_version":latest_version,
+            "update_available":bool(latest_version and ver(latest_version)>ver(APP_VERSION)),"check_error":check_error}
 
 @app.post("/api/update")
 async def update_dsm(session=Depends(require_csrf)):
