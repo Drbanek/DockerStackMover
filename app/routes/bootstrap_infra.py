@@ -12,7 +12,7 @@ import time
 import httpx
 from fastapi import Depends, HTTPException, Request
 
-from ..core import app, current_session, require_csrf, user_permissions, setting_set
+from ..core import app, current_session, require_csrf, user_permissions, setting_set, save_site
 from .provisioning import _ssh, _run
 
 
@@ -478,6 +478,10 @@ nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-portainer-ip-s
             setting_set("wg_hub_endpoint", wg_endpoint)
             setting_set("wg_hub_public_key", hub_pub)
             setting_set("main_public_ip", "")
+            setting_set("provisioning_hub_host", lan_ip)
+            setting_set("provisioning_hub_ssh_user", user)
+            setting_set("provisioning_hub_endpoint", wg_endpoint)
+            save_site(site, ".".join(lan_ip.split(".")[:3])+".0/24", 1, "", user)
             emit("save", "done", "Infrastruktura uložena")
             return {
                 "ok": True, "site": site, "portainer_url": url,

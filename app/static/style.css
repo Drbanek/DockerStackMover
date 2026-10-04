@@ -247,3 +247,10 @@ input:focus,select:focus{outline:2px solid #2563eb55;outline-offset:1px;border-c
 .infraReady{align-items:center;justify-content:space-between;gap:18px;padding:13px 14px;background:#0f241c;border:1px solid #166534;border-radius:10px}
 .infraReady strong{display:block;color:#86efac;margin-bottom:3px}
 @media(max-width:700px){.settingsTabs{flex-wrap:nowrap;overflow-x:auto}.settingsTab{white-space:nowrap}.infraReady{align-items:flex-start;flex-direction:column}}
+
+/* v1.18 Provisioning v2 */
+.provisionSiteBar{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin-bottom:12px}.provisionSiteBar label{min-width:300px;flex:1}
+.provisionHostList{display:grid;gap:8px}.provisionHost{display:grid;grid-template-columns:minmax(190px,1fr) minmax(130px,.6fr) 110px minmax(190px,1fr);gap:10px;align-items:center;background:#111827;border:1px solid #1e293b;border-radius:9px;padding:10px 12px}.provisionHost.disabled{opacity:.55}.provisionHost input,.provisionHost select{margin:0}.provisionHost label{display:flex;align-items:center;gap:8px}.provisionHost label input{width:auto}
+.provisionPlan{display:grid;grid-template-columns:1fr 1.4fr .6fr 1fr;gap:10px;padding:7px 0;border-top:1px solid #1e293b}.provisionPlan:first-of-type{margin-top:8px}
+.provisionCredentials{margin-top:14px}
+@media(max-width:800px){.provisionHost,.provisionPlan{grid-template-columns:1fr}.provisionSiteBar label{min-width:100%}}

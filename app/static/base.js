@@ -12,7 +12,7 @@ function bindEnterActions(){
 }
 document.addEventListener("DOMContentLoaded",bindEnterActions);
 
-async function login(){loadAppVersion();const error=document.getElementById("loginError");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("loginUser").value,password:document.getElementById("loginPass").value})});const raw=await response.text();if(!response.ok)throw new Error(raw);document.getElementById("loginOverlay").style.display="none";if(!await restoreSession())throw new Error("Session restore failed");if(hasPerm("admin")){await loadEndpointSettings();await loadAppSettings();await loadUsers();await loadUpdateStatus();await loadMaintenance();await loadBackups()}if(hasPerm("migrations")){await loadStacks();await loadHistory()}if(hasPerm("dashboard_read")){await loadReadiness();await loadCapacity();await loadCluster()}}catch(e){error.textContent="Přihlášení se nezdařilo."}}
+async function login(){loadAppVersion();const error=document.getElementById("loginError");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("loginUser").value,password:document.getElementById("loginPass").value})});const raw=await response.text();if(!response.ok)throw new Error(raw);document.getElementById("loginOverlay").style.display="none";if(!await restoreSession())throw new Error("Session restore failed");if(hasPerm("admin")){await loadEndpointSettings();await loadAppSettings();await loadUsers();await loadUpdateStatus();await loadMaintenance();await loadBackups();await loadProvisionSites()}if(hasPerm("migrations")){await loadStacks();await loadHistory()}if(hasPerm("dashboard_read")){await loadReadiness();await loadCapacity();await loadCluster()}}catch(e){error.textContent="Přihlášení se nezdařilo."}}
 async function restoreSession(){try{const r=await fetch("/api/session",{cache:"no-store"});if(!r.ok)return false;const data=await r.json();csrfToken=data.csrf;currentUser=data.user||"";currentPermissions=data.permissions||[];applyLanguage(data.language||"cs");applyPermissions();document.getElementById("loginOverlay").style.display="none";return true}catch(_){return false}}
 let selectedStackId=null;let selectedDetail=null;
 function esc(value){const div=document.createElement("div");div.textContent=value==null?"":String(value);return div.innerHTML}
@@ -212,7 +212,7 @@ async function showFirewall(endpointId,name){
 
 
 const provisioningSteps=[
- ["ssh","SSH připojení"],["preflight","Pre-flight kontrola"],["lan","LAN konfigurace"],
+ ["ssh","SSH připojení"],["preflight","Pre-flight kontrola"],["lan","LAN konfigurace"],["hostname","Hostname"],
  ["wg_key","WireGuard klíče"],["wg_peer","Registrace peeru na MAIN"],["wg_start","Spuštění WireGuardu"],
  ["wg_handshake","WireGuard handshake"],["wg_forward","WireGuard forwarding"],["data_disk","DATA disk /srv"],
  ["docker","Docker + Portainer Agent"],["firewall","Management firewall"],["main_test","MAIN → Portainer Agent"],
@@ -338,4 +338,36 @@ async function removeEndpoint(ep,button){
   await loadEndpointSettings();await loadReadiness();await loadCapacity();await loadCluster();
  }catch(e){alert("Odebrání serveru selhalo: "+e.message);if(state)state.textContent="Odebrání selhalo"}
  finally{button.disabled=false}
+}
+
+let provisionSites=[],provisionHosts=[];
+async function loadProvisionSites(){
+ const sel=document.getElementById("provSiteSelect");if(!sel)return;
+ try{const d=await getJson("/api/provisioning/sites");provisionSites=d.sites||[];sel.innerHTML=provisionSites.map(s=>"<option value='"+esc(s.name)+"'>"+esc(s.name)+" · "+esc(s.lan_cidr)+" · 10.200."+s.management_octet+".0/24</option>").join("");if(!provisionSites.length)sel.innerHTML="<option value=''>Nejdřív založ lokalitu</option>";document.getElementById("siteMgmt").value=d.next_management_octet||2;selectProvisionSite()}catch(e){sel.innerHTML="<option>Lokality nelze načíst</option>"}
+}
+function toggleSiteEditor(){const e=document.getElementById("provSiteEditor");e.style.display=e.style.display==="none"?"block":"none"}
+function selectProvisionSite(){const n=document.getElementById("provSiteSelect")?.value,s=provisionSites.find(x=>x.name===n);if(!s)return;document.getElementById("provSite").value=s.name;document.getElementById("provHubUser").value=(provisionSites.find(x=>x.management_octet===1)||{}).ssh_user||"";document.getElementById("provSelected").innerHTML=""}
+async function saveProvisionSite(){
+ const p={name:document.getElementById("siteName").value,lan_cidr:document.getElementById("siteLan").value,management_octet:Number(document.getElementById("siteMgmt").value),public_ip:document.getElementById("sitePublicIp").value,ssh_user:document.getElementById("siteSshUser").value};
+ const r=await fetch("/api/provisioning/sites",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(p)});if(!r.ok){alert(await r.text());return}document.getElementById("provSiteEditor").style.display="none";await loadProvisionSites();document.getElementById("provSiteSelect").value=p.name.trim().toUpperCase();selectProvisionSite()
+}
+async function discoverProvisionHosts(){
+ const site=document.getElementById("provSiteSelect").value,box=document.getElementById("provDiscovery");if(!site){alert("Nejdřív založ lokalitu.");return}box.innerHTML="<div class='muted'>Prohledávám LAN na SSH…</div>";
+ try{const d=await getJson("/api/provisioning/discovery/"+encodeURIComponent(site));provisionHosts=d.hosts||[];if(!provisionHosts.length){box.innerHTML="<div class='muted'>Nebyl nalezen žádný server s SSH.</div>";return}
+ box.innerHTML="<div class='provisionHostList'>"+provisionHosts.map((h,i)=>"<div class='provisionHost "+(h.provisioned?"disabled":"")+"'><label><input type='checkbox' class='provPick' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"> <strong>"+esc(h.ip)+"</strong></label><span class='muted'>SSH ✓"+(h.provisioned?" · už přidáno":"")+"</span><select class='provRole' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"><option>NODE</option><option>PROXY</option></select><input class='provName' data-index='"+i+"' placeholder='hostname – automaticky' "+(h.provisioned?"disabled":"")+"></div>").join("")+"</div>";
+ box.querySelectorAll(".provPick,.provRole,.provName").forEach(e=>e.addEventListener("change",previewProvisionSelection));previewProvisionSelection()
+ }catch(e){box.innerHTML="<div class='error'>Discovery selhalo: "+esc(e.message)+"</div>"}
+}
+async function previewProvisionSelection(){
+ const picks=[...document.querySelectorAll(".provPick:checked")],box=document.getElementById("provSelected");if(!picks.length){box.innerHTML="";return}const rows=[],reserved=[];
+ for(const p of picks){const i=p.dataset.index,h=provisionHosts[i],role=document.querySelector(".provRole[data-index='"+i+"']").value,name=document.querySelector(".provName[data-index='"+i+"']").value;try{const r=await fetch("/api/provisioning/plan",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({site:document.getElementById("provSiteSelect").value,lan_ip:h.ip,role,name,reserved_management_ips:reserved})});if(r.ok){const plan=await r.json();rows.push(plan);reserved.push(plan.management_ip)}}catch(_){}}
+ box.innerHTML=rows.length?"<div class='item'><strong>DSM nastaví</strong>"+rows.map(p=>"<div class='provisionPlan'><span>"+esc(p.lan_ip)+"</span><strong>"+esc(p.name)+"</strong><span>"+esc(p.role)+"</span><span>→ "+esc(p.management_ip)+"</span></div>").join("")+"</div>":""
+}
+async function provisionSelected(){
+ const picks=[...document.querySelectorAll(".provPick:checked")],password=document.getElementById("provPassword").value,hubPassword=document.getElementById("provHubPassword").value,state=document.getElementById("provState"),btn=document.getElementById("provButton");if(!picks.length){alert("Vyber alespoň jeden server.");return}if(!password||!hubPassword){alert("Vyplň SSH heslo serverů a MAIN HUBu.");return}if(!confirm("Připravit "+picks.length+" serverů?"))return;
+ btn.disabled=true;state.innerHTML="";let ok=0;
+ for(const pick of picks){const i=pick.dataset.index,h=provisionHosts[i],role=document.querySelector(".provRole[data-index='"+i+"']").value,name=document.querySelector(".provName[data-index='"+i+"']").value,row=document.createElement("div");row.className="item";row.innerHTML="<strong>"+esc(name||h.ip)+"</strong><div class='muted'>Připravuji…</div>";state.appendChild(row);
+  try{const site=provisionSites.find(s=>s.name===document.getElementById("provSiteSelect").value);let dataDisk="AUTO";if(role==="NODE"){const dr=await fetch("/api/provisioning/disks",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({host:h.ip,ssh_user:site.ssh_user,ssh_password:password})});if(dr.ok){const disks=(await dr.json()).disks||[];if(disks.length===1)dataDisk=disks[0].device;else if(disks.length>1){const choices=disks.map((d,n)=>(n+1)+": "+d.device+" ("+d.size+")").join("\n"),picked=prompt("Server "+h.ip+" má více volných DATA disků:\n\n"+choices+"\n\nZadej číslo disku:","1"),idx=Number(picked)-1;if(!Number.isInteger(idx)||!disks[idx])throw new Error("Výběr DATA disku byl zrušen nebo není platný.");dataDisk=disks[idx].device}}}const payload={site:site.name,host:h.ip,role,name,data_disk:dataDisk,ssh_user:site.ssh_user,ssh_password:password,hub_ssh_password:hubPassword};const r=await fetch("/api/provisioning/server",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(payload)});if(!r.ok)throw new Error(await r.text());const d=await r.json();row.innerHTML="<strong>✓ "+esc(d.name)+"</strong><div class='muted'>"+esc(d.lan_ip)+" → "+esc(d.management_ip)+"</div>";ok++}catch(e){row.innerHTML="<strong class='error'>✕ "+esc(name||h.ip)+"</strong><div class='error'>"+esc(e.message)+"</div>"}
+ }
+ document.getElementById("provPassword").value="";document.getElementById("provHubPassword").value="";btn.disabled=false;await loadEndpointSettings();await loadReadiness();await loadCluster();state.insertAdjacentHTML("afterbegin","<div class='ready'>Hotovo: "+ok+" / "+picks.length+" serverů</div>")
 }
