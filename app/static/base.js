@@ -11,7 +11,7 @@ function bindEnterActions(){
 }
 document.addEventListener("DOMContentLoaded",bindEnterActions);
 
-async function login(){const error=document.getElementById("loginError");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("loginUser").value,password:document.getElementById("loginPass").value})});const raw=await response.text();if(!response.ok)throw new Error(raw);document.getElementById("loginOverlay").style.display="none";if(!await restoreSession())throw new Error("Session restore failed");if(hasPerm("admin")){await loadEndpointSettings();await loadAppSettings();await loadUsers();await loadMaintenance();await loadBackups()}if(hasPerm("migrations")){await loadStacks();await loadHistory()}if(hasPerm("dashboard_read")){await loadReadiness();await loadCapacity();await loadCluster()}}catch(e){error.textContent="Přihlášení se nezdařilo."}}
+async function login(){const error=document.getElementById("loginError");error.textContent="";try{const response=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:document.getElementById("loginUser").value,password:document.getElementById("loginPass").value})});const raw=await response.text();if(!response.ok)throw new Error(raw);document.getElementById("loginOverlay").style.display="none";if(!await restoreSession())throw new Error("Session restore failed");if(hasPerm("admin")){await loadEndpointSettings();await loadAppSettings();await loadUsers();await loadUpdateStatus();await loadMaintenance();await loadBackups()}if(hasPerm("migrations")){await loadStacks();await loadHistory()}if(hasPerm("dashboard_read")){await loadReadiness();await loadCapacity();await loadCluster()}}catch(e){error.textContent="Přihlášení se nezdařilo."}}
 async function restoreSession(){try{const r=await fetch("/api/session",{cache:"no-store"});if(!r.ok)return false;const data=await r.json();csrfToken=data.csrf;currentUser=data.user||"";currentPermissions=data.permissions||[];applyLanguage(data.language||"cs");applyPermissions();document.getElementById("loginOverlay").style.display="none";return true}catch(_){return false}}
 let selectedStackId=null;let selectedDetail=null;
 function esc(value){const div=document.createElement("div");div.textContent=value==null?"":String(value);return div.innerHTML}
@@ -94,6 +94,27 @@ async function installCapacityAgent(endpointId,button){
   const raw=await r.text();if(!r.ok)throw new Error(raw);
   await loadEndpointSettings();await loadCapacity();await loadCluster();
  }catch(e){alert("Instalace Capacity Agent selhala: "+e.message);button.disabled=false;button.textContent=original}
+}
+
+async function loadUpdateStatus(){
+ const box=document.getElementById("updateState"),btn=document.getElementById("updateButton");if(!box)return;
+ try{const d=await getJson("/api/update/status");btn.disabled=!d.helper_available;
+  let msg="Běžící verze: "+esc(d.version||"neznámá")+" · kanál: GHCR latest";
+  if(!d.helper_available)msg+=" · host update helper není nainstalován";
+  if(d.result)msg+=" · poslední stav: "+esc(d.result);
+  box.innerHTML=msg;
+ }catch(e){box.textContent="Stav aktualizace nelze načíst: "+e.message;if(btn)btn.disabled=true}
+}
+async function runSelfUpdate(){
+ const btn=document.getElementById("updateButton"),box=document.getElementById("updateState");
+ if(!confirm("Stáhnout aktuální GHCR :latest a restartovat DockerStackMover?\n\nNastavení a data zůstanou zachována."))return;
+ btn.disabled=true;box.textContent="Předávám aktualizaci MGMT hostu…";
+ try{const r=await fetch("/api/update",{method:"POST",headers:{"X-CSRF-Token":csrfToken}});const raw=await r.text();if(!r.ok)throw new Error(raw);
+  box.textContent="Aktualizace běží · DSM se může na chvíli odpojit. Čekám na nový kontejner…";
+  const deadline=Date.now()+120000;
+  while(Date.now()<deadline){await new Promise(x=>setTimeout(x,2500));try{const s=await fetch("/api/setup/status",{cache:"no-store"});if(s.ok){const d=await fetch("/api/update/status",{cache:"no-store"});if(d.ok){const j=await d.json();if(String(j.result||"").startsWith("OK")){box.textContent="✓ Aktualizace dokončena · "+j.result;btn.disabled=false;return}}}}catch(_){}}
+  box.textContent="Aktualizace byla spuštěna, ale web se do 120 s nepotvrdil. Obnov stránku a zkontroluj stav.";
+ }catch(e){box.textContent="Aktualizace selhala: "+e.message;btn.disabled=false}
 }
 
 async function loadMaintenance(){

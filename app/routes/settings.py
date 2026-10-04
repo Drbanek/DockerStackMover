@@ -1,3 +1,4 @@
+from pathlib import Path
 from ..core import *
 
 @app.get("/api/setup/status")
@@ -61,3 +62,33 @@ async def account_password(request: Request, session=Depends(require_csrf)):
     with db() as conn:
         conn.execute("UPDATE app_users SET password_hash=?, updated_at=? WHERE username=?", (password_hash(new), utcnow(), username))
     return {"ok": True}
+
+
+@app.get("/api/update/status")
+async def update_status(session=Depends(require_permission("admin"))):
+    result_path = "/host-requests/update-result"
+    helper_available = os.path.exists("/host-tools/update-dsm")
+    result = ""
+    try:
+        if os.path.exists(result_path):
+            result = Path(result_path).read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return {"helper_available": helper_available, "result": result, "version": "1.15.0"}
+
+@app.post("/api/update")
+async def update_dsm(session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")):
+        raise HTTPException(403, "Permission denied")
+    if not os.path.exists("/host-tools/update-dsm"):
+        raise HTTPException(409, "Host update helper není nainstalován. Spusť jednou aktuální install.sh na MGMT.")
+    req = Path("/host-requests/update-request")
+    result = Path("/host-requests/update-result")
+    try:
+        result.unlink(missing_ok=True)
+        tmp = Path("/host-requests/update-request.tmp")
+        tmp.write_text("UPDATE\n", encoding="utf-8")
+        tmp.replace(req)
+    except Exception as exc:
+        raise HTTPException(500, "Nelze předat požadavek hostu: " + str(exc))
+    return {"ok": True, "message": "Aktualizace byla předána hostu. DSM se během aktualizace restartuje."}
