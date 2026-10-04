@@ -254,9 +254,10 @@ def new_job(stack_id, target_id):
     if not acquire_stack_lock(stack_id, job_id): raise HTTPException(409, "Tento stack už má aktivní migraci")
     migration_jobs[job_id] = job; persist_job(job); return job
 
-def job_step(job, name, state, message=""):
+def job_step(job, name, state, message="", extra=None):
     existing = next((s for s in job["steps"] if s["name"] == name), None)
     payload = {"name": name, "state": state, "message": message}
+    if extra: payload.update(extra)
     if existing: existing.update(payload)
     else: job["steps"].append(payload)
     persist_job(job)
