@@ -365,7 +365,38 @@ async def _run_volume_copy_helper(endpoint_id, name, mounts, command, network_mo
         raise HTTPException(r.status_code, "Volume helper create failed: " + r.text)
     return r.json()["Id"]
 
-async def copy_volume_local(endpoint_id, volume_name, target_volume_name):
+async def _container_path_size_mb(endpoint_id, container_id, path="/target"):
+    r = await docker_request(endpoint_id, "POST", "/containers/" + container_id + "/exec",
+        json={"AttachStdout": True, "AttachStderr": True, "Cmd": ["du", "-sm", path]})
+    if r.status_code != 201:
+        return None
+    exec_id = r.json().get("Id")
+    if not exec_id:
+        return None
+    r = await docker_request(endpoint_id, "POST", "/exec/" + exec_id + "/start",
+        json={"Detach": False, "Tty": False}, timeout=30)
+    if r.status_code != 200:
+        return None
+    match = re.search(r"(\\d+)", r.text or "")
+    return int(match.group(1)) if match else None
+
+async def _watch_copy_progress(endpoint_id, container_id, progress_callback, path="/target"):
+    if not progress_callback:
+        return
+    last_mb = -1
+    while True:
+        try:
+            mb = await _container_path_size_mb(endpoint_id, container_id, path)
+            if mb is not None and mb != last_mb:
+                await progress_callback(mb)
+                last_mb = mb
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+
+async def copy_volume_local(endpoint_id, volume_name, target_volume_name, progress_callback=None):
     """Copy a volume entirely on one Docker host. No payload traverses Portainer/DSM."""
     name = "dsm-local-copy-" + uuid.uuid4().hex[:10]
     cid = None
@@ -435,7 +466,7 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
 async def copy_volume(source_id, target_id, volume_name, target_volume_name=None, progress_callback=None):
     target_volume_name = target_volume_name or volume_name
     if int(source_id) == int(target_id):
-        return await copy_volume_local(source_id, volume_name, target_volume_name)
+        return await copy_volume_local(source_id, volume_name, target_volume_name, progress_callback)
     return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name, progress_callback)
 
 async def get_stack_file(stack_id):
