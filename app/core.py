@@ -407,26 +407,30 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
     src_id = dst_id = None
     try:
         src_id = await _run_volume_copy_helper(source_id, src_name, [
-            {"Type":"volume","Source":volume_name,"Target":"/source","ReadOnly":True}
-        ], "cd /source && tar -cf - . | nc -l -p " + str(port), "host")
+            {"Type": "volume", "Source": volume_name, "Target": "/source", "ReadOnly": True}
+        ], "set -o pipefail; cd /source && tar -cf - . | nc -l -p " + str(port), "host")
         dst_id = await _run_volume_copy_helper(target_id, dst_name, [
-            {"Type":"volume","Source":target_volume_name,"Target":"/target"}
-        ], "i=0; until nc -z " + source_ip + " " + str(port) 2>/dev/null; do i=$((i+1)); [ $i -ge 60 ] && exit 42; sleep 1; done; nc " + source_ip + " " + str(port) + " | tar -C /target -xf -", "host")
+            {"Type": "volume", "Source": target_volume_name, "Target": "/target"}
+        ], "set -o pipefail; nc " + source_ip + " " + str(port) + " | tar -C /target -xf -", "host")
         r = await docker_request(source_id, "POST", "/containers/" + src_id + "/start", json={})
-        if r.status_code not in (204,304): raise HTTPException(r.status_code, "Source transfer helper start failed: " + r.text)
-        await asyncio.sleep(0.5)
+        if r.status_code not in (204, 304):
+            raise HTTPException(r.status_code, "Source transfer helper start failed: " + r.text)
+        await asyncio.sleep(1)
         r = await docker_request(target_id, "POST", "/containers/" + dst_id + "/start", json={})
-        if r.status_code not in (204,304): raise HTTPException(r.status_code, "Target transfer helper start failed: " + r.text)
+        if r.status_code not in (204, 304):
+            raise HTTPException(r.status_code, "Target transfer helper start failed: " + r.text)
         dst_code = await wait_container(target_id, dst_id, timeout=86400)
         src_code = await wait_container(source_id, src_id, timeout=86400)
         if dst_code != 0 or src_code != 0:
             raise RuntimeError("Direct volume transfer failed: sender exit=" + str(src_code) + ", receiver exit=" + str(dst_code))
-        return {"mode":"direct","transport":network,"source_ip":source_ip,"port":port}
+        return {"mode": "direct", "transport": network, "source_ip": source_ip, "port": port}
     finally:
-        for eid,cid in ((source_id,src_id),(target_id,dst_id)):
+        for eid, cid in ((source_id, src_id), (target_id, dst_id)):
             if cid:
-                try: await remove_container(eid,cid)
-                except Exception: pass
+                try:
+                    await remove_container(eid, cid)
+                except Exception:
+                    pass
 
 async def copy_volume(source_id, target_id, volume_name, target_volume_name=None):
     target_volume_name = target_volume_name or volume_name
