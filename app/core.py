@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 import re
 import httpx
 import asyncio
@@ -296,11 +296,42 @@ VAS_HOSTING_API_URL = setting_get("vas_hosting_api_url", VAS_HOSTING_API_URL).rs
 headers = {"X-API-Key": PORTAINER_TOKEN}
 
 def portainer_config():
-    url = setting_get("portainer_url", PORTAINER_URL).rstrip("/")
-    token = setting_get("portainer_token", PORTAINER_TOKEN)
+    # Always resolve Portainer from the persistent DSM settings. CONTROL
+    # bootstrap writes these at runtime, so module-startup environment values
+    # must only be a fallback.
+    url = str(setting_get("portainer_url", "") or "").strip().rstrip("/")
+    token = str(setting_get("portainer_token", "") or "").strip()
+    if not url:
+        url = str(PORTAINER_URL or "").strip().rstrip("/")
+    if not token:
+        token = str(PORTAINER_TOKEN or "").strip()
     if not url or not token:
         raise HTTPException(503, "Portainer is not configured")
     return url, token
+
+def save_portainer_config(url, token):
+    """Persist CONTROL Portainer connection atomically and verify the write."""
+    url = str(url or "").strip().rstrip("/")
+    token = str(token or "").strip()
+    if not url or not token:
+        raise ValueError("Portainer URL and API token are required")
+    now = utcnow()
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO app_settings(key,value,secret,updated_at) VALUES(?,?,0,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, secret=0, updated_at=excluded.updated_at",
+            ("portainer_url", url, now),
+        )
+        conn.execute(
+            "INSERT INTO app_settings(key,value,secret,updated_at) VALUES(?,?,1,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, secret=1, updated_at=excluded.updated_at",
+            ("portainer_token", token, now),
+        )
+    saved_url = str(setting_get("portainer_url", "") or "").strip().rstrip("/")
+    saved_token = str(setting_get("portainer_token", "") or "").strip()
+    if saved_url != url or not hmac.compare_digest(saved_token, token):
+        raise RuntimeError("Portainer configuration was not persisted")
+    return saved_url, saved_token
 
 def client():
     url, token = portainer_config()
