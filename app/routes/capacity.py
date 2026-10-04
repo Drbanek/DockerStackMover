@@ -35,37 +35,12 @@ CAPACITY_AGENT_CONTAINER = "dockerstackmover-capacity-agent"
 
 
 async def ensure_mgmt_wireguard():
-    """Ensure the DSM host owns 10.200.1.10 before NODE health checks."""
+    """DSM 2.1: CONTROL/MGMT is the WireGuard HUB at 10.200.0.1."""
     hub_pub = (setting_get("wg_hub_public_key", "") or "").strip()
     hub_endpoint = (setting_get("wg_hub_endpoint", "") or "").strip()
     if not hub_pub or not hub_endpoint:
-        raise RuntimeError("Chybí uložené údaje WireGuard HUBu.")
-    request_dir = "/host-requests"
-    if not os.path.isdir(request_dir):
-        raise RuntimeError("MGMT WireGuard request bridge chybí. Aktualizuj MGMT pomocí aktuálního install.sh.")
-    request_path = os.path.join(request_dir, "request")
-    result_path = os.path.join(request_dir, "result")
-    try:
-        os.unlink(result_path)
-    except FileNotFoundError:
-        pass
-    tmp_path = request_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        fh.write(hub_pub + "\n" + hub_endpoint + "\n")
-    os.replace(tmp_path, request_path)
-    last = ""
-    for _ in range(60):
-        await asyncio.sleep(0.25)
-        try:
-            with open(result_path, "r", encoding="utf-8") as fh:
-                last = fh.read().strip()
-        except FileNotFoundError:
-            continue
-        if last == "OK":
-            return
-        if last.startswith("ERROR"):
-            raise RuntimeError("MGMT WireGuard aktivace selhala: " + last[5:].strip())
-    raise RuntimeError("MGMT WireGuard aktivace vypršela bez odpovědi host služby.")
+        raise RuntimeError("CONTROL WireGuard HUB není nakonfigurovaný.")
+    return
 
 
 async def _agent_container(endpoint_id):
@@ -185,8 +160,8 @@ async def node_readiness(endpoint):
     settings = get_endpoint_settings().get(endpoint_id, {})
     role = (settings.get("role") or "NONE").upper()
     host_ip, host_ip_source = endpoint_host_ip(endpoint)
-    if role == "PORTAINER" and not host_ip:
-        host_ip = (setting_get("wg_hub_lan_ip", "") or "").strip() or "10.200.1.8"
+    if role in ("PORTAINER","CONTROL","MGMT") and not host_ip:
+        host_ip = (setting_get("wg_hub_lan_ip", "") or "").strip() or "10.200.0.1"
         host_ip_source = "wg_hub"
     checks = {
         "docker": {"ok": False, "message": "Docker API unavailable"},
@@ -272,9 +247,9 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
                 yield ev("endpoint","error","Host IP se nepodařilo zjistit."); return
             yield ev("endpoint","done","Endpoint OK · "+host_ip)
 
-            yield ev("mgmt_wireguard","running","Ověřuji/aktivuji MGMT WireGuard 10.200.1.10…")
+            yield ev("mgmt_wireguard","running","Ověřuji CONTROL WireGuard HUB 10.200.0.1…")
             await ensure_mgmt_wireguard()
-            yield ev("mgmt_wireguard","done","MGMT WireGuard 10.200.1.10 aktivní")
+            yield ev("mgmt_wireguard","done","CONTROL WireGuard HUB 10.200.0.1 připraven")
 
             yield ev("migration","running","Povoluji endpoint pro migrace…")
             save_endpoint_setting(endpoint_id, True, settings.get("host_ip", ""), settings.get("site", ""),
@@ -370,13 +345,13 @@ async def prepare_node_stream(endpoint_id: int, session=Depends(require_csrf)):
                 if not fw.get("managed"):
                     # Portainer Agent is managed from MAIN .8; Capacity Agent from DockerStackMover .10.
                     applied=await agent_firewall(endpoint_id,"PUT",{
-                        "management_sources":["10.200.1.8","10.200.1.10"],
+                        "management_sources":["10.200.0.1"],
                         "management_ports":[9001,9100],
                         "confirm_timeout":90
                     })
                     txid=applied.get("transaction_id")
                     await asyncio.sleep(1)
-                    # Critical safety check: this request itself traverses 10.200.1.10 -> :9100.
+                    # Critical safety check: this request itself traverses CONTROL 10.200.0.1 -> :9100.
                     verify=await agent_firewall(endpoint_id)
                     if not verify.get("managed"):
                         raise RuntimeError("Firewall pravidla byla aplikována, ale agent je nehlásí jako spravovaná.")
