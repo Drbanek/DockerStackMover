@@ -81,7 +81,8 @@ async def update_status(session=Depends(require_permission("admin"))):
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
             response = await client.get(
                 "https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/app/core.py",
-                headers={"Accept": "text/plain", "User-Agent": "DockerStackMover/" + APP_VERSION},
+                params={"_": str(int(datetime.now(timezone.utc).timestamp()))},
+                headers={"Accept": "text/plain", "Cache-Control": "no-cache", "User-Agent": "DockerStackMover/" + APP_VERSION},
             )
             response.raise_for_status()
             match = re.search(r'^APP_VERSION\s*=\s*["\']([^"\']+)["\']', response.text, re.MULTILINE)
@@ -95,7 +96,7 @@ async def update_status(session=Depends(require_permission("admin"))):
         "result": result,
         "version": APP_VERSION,
         "latest_version": latest_version,
-        "update_available": bool(latest_version and latest_version != APP_VERSION),
+        "update_available": bool(latest_version and tuple(int(x) for x in latest_version.split(".")) > tuple(int(x) for x in APP_VERSION.split("."))),
         "check_error": check_error,
     }
 

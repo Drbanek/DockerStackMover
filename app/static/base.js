@@ -131,7 +131,7 @@ async function loadUpdateStatus(){
   if(!d.helper_available)msg+=" · host update helper není nainstalován";
   if(d.result)msg+=" · poslední stav: "+esc(d.result);
   box.innerHTML=msg;
-  if(btn)btn.disabled=!d.helper_available||!d.update_available;
+  if(btn)btn.disabled=!d.helper_available;
  }catch(e){box.textContent="Stav aktualizace nelze načíst: "+e.message;if(btn)btn.disabled=true}
 }
 async function runSelfUpdate(){
@@ -141,7 +141,7 @@ async function runSelfUpdate(){
  try{const r=await fetch("/api/update",{method:"POST",headers:{"X-CSRF-Token":csrfToken}});const raw=await r.text();if(!r.ok)throw new Error(raw);
   box.textContent="Aktualizace běží · DSM se může na chvíli odpojit. Čekám na nový kontejner…";
   const deadline=Date.now()+120000;
-  while(Date.now()<deadline){await new Promise(x=>setTimeout(x,2500));try{const s=await fetch("/api/setup/status",{cache:"no-store"});if(s.ok){const d=await fetch("/api/update/status",{cache:"no-store"});if(d.ok){const j=await d.json();if(String(j.result||"").startsWith("OK")){box.textContent="✓ Aktualizace dokončena · "+j.result;btn.disabled=false;return}}}}catch(_){}}
+  while(Date.now()<deadline){await new Promise(x=>setTimeout(x,2500));try{const s=await fetch("/api/setup/status",{cache:"no-store"});if(s.ok){const d=await fetch("/api/update/status",{cache:"no-store"});if(d.ok){const j=await d.json();if(String(j.result||"").startsWith("OK")){await loadUpdateStatus();return}if(String(j.result||"").startsWith("ERROR")){box.textContent="Aktualizace selhala: "+j.result;btn.disabled=false;return}}}}catch(_){}}
   box.textContent="Aktualizace byla spuštěna, ale web se do 120 s nepotvrdil. Obnov stránku a zkontroluj stav.";
  }catch(e){box.textContent="Aktualizace selhala: "+e.message;btn.disabled=false}
 }
