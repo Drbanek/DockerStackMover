@@ -118,6 +118,61 @@ EOF
 systemctl daemon-reload
 systemctl enable --now dockerstackmover-wg-request.path
 
+
+# Narrow self-update helper. The web app can only request a fixed update of
+# /opt/dockerstackmover using the published GHCR :latest image.
+cat >/opt/dockerstackmover-host-tools/update-dsm <<'DSMUPDATE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd /opt/dockerstackmover
+docker compose pull dockerstackmover
+docker compose up -d --no-deps dockerstackmover
+DSMUPDATE
+chmod 0755 /opt/dockerstackmover-host-tools/update-dsm
+
+cat >/usr/local/sbin/dockerstackmover-update-request-handler <<'DSMUPDATEBROKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+REQ=/opt/dockerstackmover-host-requests/update-request
+RES=/opt/dockerstackmover-host-requests/update-result
+[[ -f "$REQ" ]] || exit 0
+VALUE=$(tr -d '\r\n' <"$REQ")
+rm -f "$REQ"
+if [[ "$VALUE" != "UPDATE" ]]; then
+  printf 'ERROR invalid update request\n' >"$RES"
+  exit 0
+fi
+printf 'RUNNING\n' >"$RES"
+if OUT=$(/opt/dockerstackmover-host-tools/update-dsm 2>&1); then
+  printf 'OK %s\n' "$(date -u +%FT%TZ)" >"$RES"
+else
+  RC=$?
+  printf 'ERROR rc=%s %s\n' "$RC" "$(printf '%s' "$OUT" | tail -c 500)" >"$RES"
+fi
+DSMUPDATEBROKER
+chmod 0755 /usr/local/sbin/dockerstackmover-update-request-handler
+
+cat >/etc/systemd/system/dockerstackmover-update-request.service <<'EOF'
+[Unit]
+Description=DockerStackMover self-update request handler
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dockerstackmover-update-request-handler
+EOF
+cat >/etc/systemd/system/dockerstackmover-update-request.path <<'EOF'
+[Unit]
+Description=Watch DockerStackMover self-update requests
+[Path]
+PathExists=/opt/dockerstackmover-host-requests/update-request
+Unit=dockerstackmover-update-request.service
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now dockerstackmover-update-request.path
+
 # Prepare the application first on the current address. The permanent IP
 # switch is intentionally the final step because an SSH session can be lost.
 install -d -m 0750 /opt/dockerstackmover
