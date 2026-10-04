@@ -212,7 +212,7 @@ async function showFirewall(endpointId,name){
 
 
 const provisioningSteps=[
- ["ssh","SSH připojení"],["preflight","Pre-flight kontrola"],["lan","LAN konfigurace"],
+ ["ssh","SSH připojení"],["preflight","Pre-flight kontrola"],["lan","LAN konfigurace"],["hostname","Hostname"],
  ["wg_key","WireGuard klíče"],["wg_peer","Registrace peeru na MAIN"],["wg_start","Spuštění WireGuardu"],
  ["wg_handshake","WireGuard handshake"],["wg_forward","WireGuard forwarding"],["data_disk","DATA disk /srv"],
  ["docker","Docker + Portainer Agent"],["firewall","Management firewall"],["main_test","MAIN → Portainer Agent"],
@@ -359,8 +359,8 @@ async function discoverProvisionHosts(){
  }catch(e){box.innerHTML="<div class='error'>Discovery selhalo: "+esc(e.message)+"</div>"}
 }
 async function previewProvisionSelection(){
- const picks=[...document.querySelectorAll(".provPick:checked")],box=document.getElementById("provSelected");if(!picks.length){box.innerHTML="";return}const rows=[];
- for(const p of picks){const i=p.dataset.index,h=provisionHosts[i],role=document.querySelector(".provRole[data-index='"+i+"']").value,name=document.querySelector(".provName[data-index='"+i+"']").value;try{const r=await fetch("/api/provisioning/plan",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({site:document.getElementById("provSiteSelect").value,lan_ip:h.ip,role,name})});if(r.ok)rows.push(await r.json())}catch(_){}}
+ const picks=[...document.querySelectorAll(".provPick:checked")],box=document.getElementById("provSelected");if(!picks.length){box.innerHTML="";return}const rows=[],reserved=[];
+ for(const p of picks){const i=p.dataset.index,h=provisionHosts[i],role=document.querySelector(".provRole[data-index='"+i+"']").value,name=document.querySelector(".provName[data-index='"+i+"']").value;try{const r=await fetch("/api/provisioning/plan",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({site:document.getElementById("provSiteSelect").value,lan_ip:h.ip,role,name,reserved_management_ips:reserved})});if(r.ok){const plan=await r.json();rows.push(plan);reserved.push(plan.management_ip)}}catch(_){}}
  box.innerHTML=rows.length?"<div class='item'><strong>DSM nastaví</strong>"+rows.map(p=>"<div class='provisionPlan'><span>"+esc(p.lan_ip)+"</span><strong>"+esc(p.name)+"</strong><span>"+esc(p.role)+"</span><span>→ "+esc(p.management_ip)+"</span></div>").join("")+"</div>":""
 }
 async function provisionSelected(){
