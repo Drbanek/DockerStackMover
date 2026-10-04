@@ -3,7 +3,7 @@ from ..core import *
 
 @app.get("/api/setup/status")
 async def setup_status():
-    return {"required": setup_required(), "version": "1.14.6", "language": setting_get("language","cs")}
+    return {"required": setup_required(), "version": APP_VERSION, "language": setting_get("language","cs")}
 
 @app.post("/api/setup")
 async def first_setup(request: Request):
@@ -74,7 +74,7 @@ async def update_status(session=Depends(require_permission("admin"))):
             result = Path(result_path).read_text(encoding="utf-8").strip()
     except Exception:
         pass
-    return {"helper_available": helper_available, "result": result, "version": "1.15.0"}
+    return {"helper_available": helper_available, "result": result, "version": APP_VERSION}
 
 @app.post("/api/update")
 async def update_dsm(session=Depends(require_csrf)):
