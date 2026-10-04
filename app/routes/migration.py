@@ -91,14 +91,19 @@ async def migration_worker(job):
             for volume in detail["volumes"]:
                 backup_name = "dsm-backup-" + backup_id + "-" + volume["name"]
                 await create_volume(source_id, backup_name, volume.get("driver") or "local")
-                await copy_volume(source_id, source_id, volume["name"], backup_name)
-                backup_volumes.append({"source": volume["name"], "backup": backup_name})
+                copy_info = await copy_volume(source_id, source_id, volume["name"], backup_name)
+                backup_volumes.append({"source": volume["name"], "backup": backup_name, "transport": copy_info.get("transport","node-local")})
             setting_set("backup:" + backup_id, json.dumps({"id":backup_id,"created_at":utcnow(),"stack":detail["stack"],"volumes":backup_volumes,"domains":detail["domains"],"stack_file":stack_file,"type":"pre-migration-volume-snapshot"}))
-            job_step(job, "Snapshot před migrací", "ok", str(len(backup_volumes)) + " volume snapshot(y) vytvořeny · " + backup_id)
+            job_step(job, "Snapshot před migrací", "ok", str(len(backup_volumes)) + " volume snapshot(y) vytvořeny lokálně na zdrojovém NODE · " + backup_id)
         for volume in detail["volumes"]:
             step_name = "Volume: " + volume["name"]; job_step(job, step_name, "running", "Vytvářím volume na cíli")
-            await create_volume(target_id, volume["name"], volume.get("driver") or "local"); created_volumes.append(volume["name"]); job_step(job, step_name, "running", "Kopíruji obsah přes Docker archive API")
-            await copy_volume(source_id, target_id, volume["name"]); job_step(job, step_name, "ok", "Data přenesena")
+            await create_volume(target_id, volume["name"], volume.get("driver") or "local"); created_volumes.append(volume["name"])
+            source_cfg = get_endpoint_settings().get(int(source_id), {}); target_cfg = get_endpoint_settings().get(int(target_id), {})
+            same_site = bool(source_cfg.get("site")) and str(source_cfg.get("site")).strip().upper() == str(target_cfg.get("site") or "").strip().upper()
+            planned_transport = "LAN NODE → NODE" if same_site else "WireGuard NODE → NODE"
+            job_step(job, step_name, "running", "Přímý přenos " + planned_transport + " · DSM pouze řídí přenos")
+            copy_info = await copy_volume(source_id, target_id, volume["name"])
+            job_step(job, step_name, "ok", "Data přenesena přímo přes " + str(copy_info.get("transport") or planned_transport))
         # Persist the exact final Compose sent to Portainer. This is intentionally
         # attached to the migration job so failed target deployments can be diagnosed
         # without guessing which transformation produced the final port bindings.
