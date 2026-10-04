@@ -60,6 +60,7 @@ systemctl enable --now wg-quick@wg-dsm
 
 # Narrow self-update helper. The web app can only request a fixed update of
 # /opt/dockerstackmover using the published GHCR :latest image.
+install -d -m 0755 /opt/dockerstackmover-host-tools /opt/dockerstackmover-host-requests
 cat >/opt/dockerstackmover-host-tools/update-dsm <<'DSMUPDATE'
 #!/usr/bin/env bash
 set -Eeuo pipefail
