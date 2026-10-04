@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.19.1"
+APP_VERSION = "1.19.2"
 import re
 import httpx
 import asyncio
@@ -377,7 +377,7 @@ async def _container_path_size_mb(endpoint_id, container_id, path="/target"):
         json={"Detach": False, "Tty": False}, timeout=30)
     if r.status_code != 200:
         return None
-    match = re.search(r"(\\d+)", r.text or "")
+    match = re.search(r"(\d+)", r.text or "")
     return int(match.group(1)) if match else None
 
 async def _watch_copy_progress(endpoint_id, container_id, progress_callback, path="/target"):
@@ -394,7 +394,7 @@ async def _watch_copy_progress(endpoint_id, container_id, progress_callback, pat
             raise
         except Exception:
             pass
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(0.5)
 
 async def copy_volume_local(endpoint_id, volume_name, target_volume_name, progress_callback=None):
     """Copy a volume entirely on one Docker host. No payload traverses Portainer/DSM."""
