@@ -424,6 +424,21 @@ async def provisioning_discovery(site_name: str, session=Depends(require_permiss
     found=await asyncio.gather(*(check(ip) for ip in net.hosts()))
     return {"site":site,"hosts":[x for x in found if x]}
 
+@app.post("/api/provisioning/disks")
+async def provisioning_disks(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
+    p=await request.json();host=str(p.get("host") or "").strip();user=str(p.get("ssh_user") or "").strip();password=str(p.get("ssh_password") or "")
+    if not host or not user or not password: raise HTTPException(400,"Chybí SSH údaje.")
+    def inspect():
+        c=_ssh(host,22,user,password)
+        try:
+            out=_run(c,"""ROOT_SRC=$(findmnt -no SOURCE /); ROOT_DISK=$(lsblk -s -npo NAME,TYPE "$ROOT_SRC" | awk '$2=="disk"{print $1;exit}'); while read -r DEV TYPE SIZE; do [ "$TYPE" = disk ] || continue; [ "$DEV" = "$ROOT_DISK" ] && continue; [ -n "$(lsblk -nrpo MOUNTPOINTS "$DEV" | tr -d '[:space:]')" ] && continue; [ -n "$(lsblk -nrpo FSTYPE "$DEV" | tr -d '[:space:]')" ] && continue; echo "$DEV|$SIZE"; done < <(lsblk -dpno NAME,TYPE,SIZE)""")
+            return [{"device":line.split("|",1)[0],"size":line.split("|",1)[1] if "|" in line else ""} for line in out.splitlines() if line.strip()]
+        finally: c.close()
+    try: disks=await asyncio.to_thread(inspect)
+    except Exception as exc: raise HTTPException(502,"Kontrola disků selhala: "+str(exc))
+    return {"disks":disks}
+
 @app.post("/api/provisioning/plan")
 async def provisioning_plan(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
