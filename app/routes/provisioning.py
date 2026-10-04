@@ -10,7 +10,7 @@ import uuid
 import paramiko
 from fastapi import Depends, HTTPException, Request
 
-from ..core import app, require_csrf, require_permission, user_permissions, client, save_endpoint_setting, get_endpoint_settings, get_sites, get_site, save_site, next_management_octet, setting_get
+from ..core import app, require_csrf, require_permission, user_permissions, client, save_endpoint_setting, get_endpoint_settings, get_sites, get_site, save_site, next_management_octet, setting_get, setting_set
 
 
 def _ssh(host, port, username, password):
@@ -107,6 +107,9 @@ nohup sh -c 'sleep 2; netplan apply' >/tmp/dsm-netplan.log 2>&1 &"""
             host=lan_ip
             steps.append("LAN IP changed to "+lan_ip); progress("lan","done","LAN IP changed to "+lan_ip)
         if host == lan_ip: progress("lan","done","LAN IP už je nastavena: "+lan_ip)
+        progress("hostname","running","Nastavuji hostname "+name+"…")
+        _run(target,"hostnamectl set-hostname "+shlex.quote(name),password)
+        steps.append("Hostname "+name); progress("hostname","done","Hostname "+name)
         progress("wg_key","running","Čekám na dokončení automatických aktualizací systému…")
         apt_wait = """deadline=$((SECONDS+300))
 while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
@@ -439,13 +442,14 @@ def _hydrate_v2_payload(payload):
     p=dict(payload);p.update(plan)
     p["site"]=site["name"];p["public_ip"]=site.get("public_ip") or ""
     p["ssh_user"]=str(p.get("ssh_user") or site.get("ssh_user") or "")
-    p["hub_host"]=str(p.get("hub_host") or setting_get("provisioning_hub_host","")).strip()
-    p["hub_ssh_user"]=str(p.get("hub_ssh_user") or setting_get("provisioning_hub_ssh_user","")).strip()
-    p["hub_endpoint"]=str(p.get("hub_endpoint") or setting_get("provisioning_hub_endpoint","")).strip()
+    p["hub_host"]=str(p.get("hub_host") or setting_get("provisioning_hub_host", setting_get("wg_hub_lan_ip",""))).strip()
+    p["hub_ssh_user"]=str(p.get("hub_ssh_user") or setting_get("provisioning_hub_ssh_user", p.get("ssh_user") or "")).strip()
+    p["hub_endpoint"]=str(p.get("hub_endpoint") or setting_get("provisioning_hub_endpoint", setting_get("wg_hub_endpoint",""))).strip()
+    if p["hub_ssh_user"]: setting_set("provisioning_hub_ssh_user", p["hub_ssh_user"])
     return p
 
 PROVISION_STEPS = [
-    ("ssh","SSH připojení"), ("preflight","Pre-flight kontrola"), ("lan","LAN konfigurace"),
+    ("ssh","SSH připojení"), ("preflight","Pre-flight kontrola"), ("lan","LAN konfigurace"), ("hostname","Hostname"),
     ("wg_key","WireGuard klíče"), ("wg_peer","Registrace peeru na MAIN"),
     ("wg_start","Spuštění WireGuardu"), ("wg_handshake","WireGuard handshake"),
     ("wg_forward","WireGuard forwarding"), ("data_disk","DATA disk /srv"),
@@ -524,7 +528,7 @@ async def provision_server_stream(request: Request, session=Depends(require_csrf
 async def provision_server(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")):
         raise HTTPException(403,"Permission denied")
-    payload=await request.json()
+    payload=_hydrate_v2_payload(await request.json())
     try:
         result=await asyncio.to_thread(_provision,payload)
     except Exception as exc:
