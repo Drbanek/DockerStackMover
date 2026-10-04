@@ -52,8 +52,8 @@ def _provision(payload, progress=None):
     role = str(payload.get("role") or "NODE").strip().upper()
     lan_ip = str(payload.get("lan_ip") or "").strip()
     mgmt_ip = str(payload.get("management_ip") or "").strip()
-    hub_mgmt_ip = str(payload.get("hub_management_ip") or "10.200.1.8").strip()
-    manager_mgmt_ip = str(payload.get("manager_management_ip") or "10.200.1.10").strip()
+    hub_mgmt_ip = str(payload.get("hub_management_ip") or "10.200.0.1").strip()
+    manager_mgmt_ip = str(payload.get("manager_management_ip") or "10.200.0.1").strip()
     data_disk = str(payload.get("data_disk") or "AUTO").strip()
     hub_endpoint = str(payload.get("hub_endpoint") or "").strip()
     name = str(payload.get("name") or (site + "-" + role)).strip().upper()
@@ -387,9 +387,9 @@ def _site_plan(site, role, lan_ip, name="", reserved=None, node_suffix=None):
     settings = get_endpoint_settings()
     used_mgmt = {str(v.get("host_ip") or "") for v in settings.values()} | set(reserved or [])
     if role == "PROXY":
-        suffix = 9
+        suffix = 10
         generated = site["name"]+"-PROXY"
-        if "10.200.%d.9"%site["management_octet"] in used_mgmt: raise ValueError("PROXY .9 už je v lokalitě obsazená.")
+        if "10.200.%d.10"%site["management_octet"] in used_mgmt: raise ValueError("PROXY .10 už je v lokalitě obsazená.")
     else:
         candidates = [x for x in range(11,30) if "10.200.%d.%d"%(site["management_octet"],x) not in used_mgmt]
         if not candidates: raise ValueError("Lokalita nemá volnou NODE management adresu .11-.29.")
