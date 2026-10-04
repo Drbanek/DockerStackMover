@@ -1,4 +1,5 @@
 from pathlib import Path
+import httpx
 from ..core import *
 
 @app.get("/api/setup/status")
@@ -74,7 +75,29 @@ async def update_status(session=Depends(require_permission("admin"))):
             result = Path(result_path).read_text(encoding="utf-8").strip()
     except Exception:
         pass
-    return {"helper_available": helper_available, "result": result, "version": APP_VERSION}
+    latest_version = ""
+    check_error = ""
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            response = await client.get(
+                "https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/app/core.py",
+                headers={"Accept": "text/plain", "User-Agent": "DockerStackMover/" + APP_VERSION},
+            )
+            response.raise_for_status()
+            match = re.search(r'^APP_VERSION\\s*=\\s*["\\\']([^"\\\']+)["\\\']', response.text, re.MULTILINE)
+            if not match:
+                raise RuntimeError("Verze nebyla v main nalezena")
+            latest_version = match.group(1)
+    except Exception as exc:
+        check_error = str(exc)
+    return {
+        "helper_available": helper_available,
+        "result": result,
+        "version": APP_VERSION,
+        "latest_version": latest_version,
+        "update_available": bool(latest_version and latest_version != APP_VERSION),
+        "check_error": check_error,
+    }
 
 @app.post("/api/update")
 async def update_dsm(session=Depends(require_csrf)):
