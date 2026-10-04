@@ -1,8 +1,8 @@
-# DockerStackMover 2.0
+# DockerStackMover 2.1
 
 **Čeština** | [English](README.en.md)
 
-DockerStackMover (DSM) je webový management a migrační systém pro Docker Compose infrastrukturu nad Portainerem. Verze 2.0 spojuje provisioning serverů, správu lokalit, WireGuard management, monitoring kapacity, migraci stacků a persistentních dat, proxy/DNS cutover, snapshoty a rollback do jednoho rozhraní.
+DockerStackMover (DSM) je webový management a migrační systém pro Docker Compose infrastrukturu nad Portainerem. Verze 2.1 spojuje provisioning serverů, správu lokalit, WireGuard management, monitoring kapacity, migraci stacků a persistentních dat, proxy/DNS cutover, snapshoty a rollback do jednoho rozhraní.
 
 > V2 princip: DSM migraci řídí, ale velká data netečou přes MGMT. Persistentní volumes se mezi NODE servery kopírují přímo přes LAN nebo WireGuard.
 
@@ -11,7 +11,7 @@ DockerStackMover (DSM) je webový management a migrační systém pro Docker Com
 - bootstrap MGMT a webový first-run setup
 - příprava první infrastruktury a Portaineru z UI
 - více lokalit, SSH discovery a provisioning NODE/PROXY
-- role MGMT, PORTAINER/MAIN, PROXY a NODE
+- tři role: CONTROL (MGMT + Portainer + WireGuard HUB), PROXY a NODE
 - automatická instalace Dockeru, Portainer Agentu, Capacity Agentu a Traefiku podle role
 - centrální WireGuard management síť a management firewall
 - DATA disk /srv, XFS project quota a Docker persistentní volumes na /srv/docker-volumes
@@ -34,9 +34,9 @@ DockerStackMover (DSM) je webový management a migrační systém pro Docker Com
 ## Doporučená struktura
 
 ~~~text
-Internet -> veřejná IP -> PROXY (.9 / Traefik) -> NODE (.11-.29)
+Internet -> veřejná IP -> PROXY (.10 / Traefik) -> NODE (.11-.29)
                          |
-MGMT (.10) -> PORTAINER/MAIN (.8) -> management WireGuard -> všechny lokality
+CONTROL/MGMT (.9) -> DSM + Portainer + WireGuard HUB (10.200.0.1) -> všechny lokality
 
 NODE:
 SYSTEM disk -> /var/lib/docker (engine, images, overlay)
@@ -44,7 +44,7 @@ DATA disk   -> /srv/docker-volumes
                ^ bind mount do /var/lib/docker/volumes
 ~~~
 
-Adresní konvence: PORTAINER/MAIN .8, PROXY .9, MGMT .10, NODE .11-.29. WireGuard používá management rozsah 10.200.<lokalita>.<suffix>. Každá lokalita může mít vlastní PROXY a produkční LAN nemusí být mezi lokalitami routovaná.
+Adresní konvence: CONTROL/MGMT .9, PROXY .10, NODE .11-.29. CONTROL používá WireGuard 10.200.0.1; lokality používají management rozsah 10.200.<lokalita>.<suffix>. Každá lokalita může mít vlastní PROXY a produkční LAN nemusí být mezi lokalitami routovaná.
 
 ## Storage model NODE
 
@@ -81,9 +81,9 @@ Na čistém Ubuntu Serveru určeném pro MGMT:
 curl -fsSL https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/install.sh | sudo bash
 ~~~
 
-Instalátor připraví Docker, WireGuard identitu MGMT, bezpečné host helpery, DSM z GHCR a standardizuje MGMT na LAN suffix .10. UI je standardně na portu 8082. Při změně IP může být SSH spojení ukončeno; pokračuje se na nové .10 adrese.
+Instalátor připraví Docker, WireGuard identitu MGMT, bezpečné host helpery, DSM z GHCR a standardizuje CONTROL/MGMT na LAN suffix .9 a připraví centrální WireGuard HUB 10.200.0.1. UI je standardně na portu 8082. Při změně IP může být SSH spojení ukončeno; pokračuje se na nové .9 adrese.
 
-Po prvním přihlášení vytvoř administrátora a v Nastavení → Infrastruktura připrav první PORTAINER/MAIN. Další lokality a NODE/PROXY se nasazují přes Provisioning infrastruktury V2.
+Po prvním přihlášení vytvoř administrátora a v Nastavení → Infrastruktura dokonči CONTROL infrastrukturu a inicializaci Portaineru. Další lokality a NODE/PROXY se nasazují přes Provisioning infrastruktury V2.
 
 ## Provisioning
 
