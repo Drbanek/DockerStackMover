@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.19.1"
 import re
 import httpx
 import asyncio
@@ -365,7 +365,38 @@ async def _run_volume_copy_helper(endpoint_id, name, mounts, command, network_mo
         raise HTTPException(r.status_code, "Volume helper create failed: " + r.text)
     return r.json()["Id"]
 
-async def copy_volume_local(endpoint_id, volume_name, target_volume_name):
+async def _container_path_size_mb(endpoint_id, container_id, path="/target"):
+    r = await docker_request(endpoint_id, "POST", "/containers/" + container_id + "/exec",
+        json={"AttachStdout": True, "AttachStderr": True, "Cmd": ["du", "-sm", path]})
+    if r.status_code != 201:
+        return None
+    exec_id = r.json().get("Id")
+    if not exec_id:
+        return None
+    r = await docker_request(endpoint_id, "POST", "/exec/" + exec_id + "/start",
+        json={"Detach": False, "Tty": False}, timeout=30)
+    if r.status_code != 200:
+        return None
+    match = re.search(r"(\\d+)", r.text or "")
+    return int(match.group(1)) if match else None
+
+async def _watch_copy_progress(endpoint_id, container_id, progress_callback, path="/target"):
+    if not progress_callback:
+        return
+    last_mb = -1
+    while True:
+        try:
+            mb = await _container_path_size_mb(endpoint_id, container_id, path)
+            if mb is not None and mb != last_mb:
+                await progress_callback(mb)
+                last_mb = mb
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(1.5)
+
+async def copy_volume_local(endpoint_id, volume_name, target_volume_name, progress_callback=None):
     """Copy a volume entirely on one Docker host. No payload traverses Portainer/DSM."""
     name = "dsm-local-copy-" + uuid.uuid4().hex[:10]
     cid = None
@@ -377,7 +408,19 @@ async def copy_volume_local(endpoint_id, volume_name, target_volume_name):
         r = await docker_request(endpoint_id, "POST", "/containers/" + cid + "/start", json={})
         if r.status_code not in (204, 304):
             raise HTTPException(r.status_code, "Local volume copy start failed: " + r.text)
-        code = await wait_container(endpoint_id, cid, timeout=86400)
+        progress_task = asyncio.create_task(_watch_copy_progress(endpoint_id, cid, progress_callback))
+        try:
+            code = await wait_container(endpoint_id, cid, timeout=86400)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        if progress_callback:
+            final_mb = await _container_path_size_mb(endpoint_id, cid)
+            if final_mb is not None:
+                await progress_callback(final_mb)
         if code != 0:
             logs = await docker_request(endpoint_id, "GET", "/containers/" + cid + "/logs", params={"stdout":"1","stderr":"1","tail":"80"})
             raise RuntimeError("Local volume copy failed (exit " + str(code) + "): " + logs.text[-2000:])
@@ -396,7 +439,7 @@ def _endpoint_transfer_ip(endpoint_id, peer_id):
         return (src.get("lan_ip") or src.get("host_ip") or "").strip(), "LAN"
     return (src.get("host_ip") or src.get("lan_ip") or "").strip(), "WireGuard"
 
-async def copy_volume_direct(source_id, target_id, volume_name, target_volume_name):
+async def copy_volume_direct(source_id, target_id, volume_name, target_volume_name, progress_callback=None):
     """Stream tar directly NODE->NODE. DSM only orchestrates helper containers."""
     source_ip, network = _endpoint_transfer_ip(source_id, target_id)
     if not source_ip:
@@ -419,7 +462,19 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
         r = await docker_request(target_id, "POST", "/containers/" + dst_id + "/start", json={})
         if r.status_code not in (204, 304):
             raise HTTPException(r.status_code, "Target transfer helper start failed: " + r.text)
-        dst_code = await wait_container(target_id, dst_id, timeout=86400)
+        progress_task = asyncio.create_task(_watch_copy_progress(target_id, dst_id, progress_callback))
+        try:
+            dst_code = await wait_container(target_id, dst_id, timeout=86400)
+        finally:
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        if progress_callback:
+            final_mb = await _container_path_size_mb(target_id, dst_id)
+            if final_mb is not None:
+                await progress_callback(final_mb)
         src_code = await wait_container(source_id, src_id, timeout=86400)
         if dst_code != 0 or src_code != 0:
             raise RuntimeError("Direct volume transfer failed: sender exit=" + str(src_code) + ", receiver exit=" + str(dst_code))
@@ -432,11 +487,11 @@ async def copy_volume_direct(source_id, target_id, volume_name, target_volume_na
                 except Exception:
                     pass
 
-async def copy_volume(source_id, target_id, volume_name, target_volume_name=None):
+async def copy_volume(source_id, target_id, volume_name, target_volume_name=None, progress_callback=None):
     target_volume_name = target_volume_name or volume_name
     if int(source_id) == int(target_id):
-        return await copy_volume_local(source_id, volume_name, target_volume_name)
-    return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name)
+        return await copy_volume_local(source_id, volume_name, target_volume_name, progress_callback)
+    return await copy_volume_direct(source_id, target_id, volume_name, target_volume_name, progress_callback)
 
 async def get_stack_file(stack_id):
     async with client() as c:
