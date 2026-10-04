@@ -170,6 +170,7 @@ for _ in $(seq 1 30); do
       cat >"$NETPLAN" <<EOF
 network:
   version: 2
+  renderer: networkd
   ethernets:
     $IFACE:
       dhcp4: false
@@ -211,7 +212,12 @@ exec >>"\$LOG" 2>&1
 
 sleep 3
 echo "Applying static MGMT address \$TARGET_IP/\$PREFIX on \$IFACE"
-if netplan generate && netplan apply; then
+if netplan generate; then
+  # Ubuntu 26.04 may generate netplan .network files as 0600 while
+  # systemd-networkd runs with group systemd-network and cannot read them.
+  # Make generated networkd profiles group-readable before applying them.
+  find /run/systemd/network -maxdepth 1 -type f -name '*-netplan-*.network' -exec chmod 0640 {} +
+  if netplan apply; then
   for _ in \$(seq 1 15); do
     if ip -o -4 addr show dev "\$IFACE" | grep -q " \$TARGET_IP/\$PREFIX "; then
       echo "Target address is active."
@@ -220,11 +226,13 @@ if netplan generate && netplan apply; then
     fi
     sleep 1
   done
+  fi
 fi
 
 echo "Static address activation failed; restoring DHCP configuration."
 cp -a "\$BACKUP" "\$NETPLAN"
 netplan generate
+find /run/systemd/network -maxdepth 1 -type f -name '*-netplan-*.network' -exec chmod 0640 {} +
 netplan apply
 sed -i "s/^MOVER_BIND_IP=.*/MOVER_BIND_IP=$MGMT_IP/" /opt/dockerstackmover/.env
 docker compose --env-file /opt/dockerstackmover/.env -f /opt/dockerstackmover/compose.yaml up -d --force-recreate || true
