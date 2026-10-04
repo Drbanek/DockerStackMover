@@ -354,7 +354,7 @@ async function saveProvisionSite(){
 async function discoverProvisionHosts(){
  const site=document.getElementById("provSiteSelect").value,box=document.getElementById("provDiscovery");if(!site){alert("Nejdřív založ lokalitu.");return}box.innerHTML="<div class='muted'>Prohledávám LAN na SSH…</div>";
  try{const d=await getJson("/api/provisioning/discovery/"+encodeURIComponent(site));provisionHosts=d.hosts||[];if(!provisionHosts.length){box.innerHTML="<div class='muted'>Nebyl nalezen žádný server s SSH.</div>";return}
- box.innerHTML="<div class='provisionHostList'>"+provisionHosts.map((h,i)=>"<div class='provisionHost "+(h.provisioned?"disabled":"")+"'><label><input type='checkbox' class='provPick' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"> <strong>"+esc(h.ip)+"</strong></label><span class='muted'>SSH ✓"+(h.provisioned?" · už přidáno":"")+"</span><select class='provRole' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"><option>NODE</option><option>PROXY</option></select><input class='provName' data-index='"+i+"' placeholder='hostname – automaticky' "+(h.provisioned?"disabled":"")+"></div>").join("")+"</div>";
+ box.innerHTML="<div class=\'actions\' style=\'margin-bottom:8px\'><button class=\'secondary\' onclick=\'identifyProvisionHosts()\'>Načíst názvy z Ubuntu</button></div><div class=\'provisionHostList\'>"+provisionHosts.map((h,i)=>"<div class='provisionHost "+(h.provisioned?"disabled":"")+"'><label><input type='checkbox' class='provPick' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"> <strong>"+esc(h.ip)+"</strong></label><span class='muted'>SSH ✓"+(h.provisioned?" · už přidáno":"")+"</span><select class='provRole' data-index='"+i+"' "+(h.provisioned?"disabled":"")+"><option>NODE</option><option>PROXY</option></select><input class='provName' data-index='"+i+"' placeholder='hostname – automaticky' "+(h.provisioned?"disabled":"")+"></div>").join("")+"</div>";
  box.querySelectorAll(".provPick,.provRole,.provName").forEach(e=>e.addEventListener("change",previewProvisionSelection));previewProvisionSelection()
  }catch(e){box.innerHTML="<div class='error'>Discovery selhalo: "+esc(e.message)+"</div>"}
 }
@@ -382,4 +382,11 @@ async function provisionSelected(){
   }catch(e){row.insertAdjacentHTML("beforeend","<div class='error'>✕ "+esc(e.message)+"</div>")}
  }
  document.getElementById("provPassword").value="";document.getElementById("provHubPassword").value="";btn.disabled=false;await loadEndpointSettings();await loadReadiness();await loadCluster();state.insertAdjacentHTML("afterbegin","<div class='ready'>Hotovo: "+ok+" / "+picks.length+" serverů</div>")
+}
+
+async function identifyProvisionHosts(){
+ const site=provisionSites.find(s=>s.name===document.getElementById("provSiteSelect").value),password=document.getElementById("provPassword").value;if(!site||!password){alert("Nejdřív vyplň SSH heslo serverů.");return}
+ const r=await fetch("/api/provisioning/identify",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({hosts:provisionHosts.map(h=>h.ip),ssh_user:site.ssh_user,ssh_password:password})});if(!r.ok){alert(await r.text());return}const d=await r.json();
+ d.hosts.forEach(h=>{const idx=provisionHosts.findIndex(x=>x.ip===h.ip);if(idx<0||!h.hostname)return;provisionHosts[idx].hostname=h.hostname;const input=document.querySelector(".provName[data-index='"+idx+"']");if(input){input.placeholder=h.hostname;if(!/^(ubuntu|localhost)(-|$)/i.test(h.hostname)&&!input.value)input.value=h.hostname;const label=input.closest(".provisionHost")?.querySelector("label strong");if(label)label.textContent=h.ip+" · "+h.hostname}});
+ previewProvisionSelection()
 }
