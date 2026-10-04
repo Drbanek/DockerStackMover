@@ -357,7 +357,7 @@ docker port portainer_agent 9001/tcp | grep -q 9001"""
 
 
 
-def _site_plan(site, role, lan_ip, name=""):
+def _site_plan(site, role, lan_ip, name="", reserved=None):
     role = str(role or "NODE").upper()
     if role not in ("NODE","PROXY"):
         raise ValueError("Podporovaná role je NODE nebo PROXY.")
@@ -367,21 +367,20 @@ def _site_plan(site, role, lan_ip, name=""):
         raise ValueError("LAN IP není v rozsahu lokality "+site["lan_cidr"])
     suffix = int(str(ip).split(".")[-1])
     settings = get_endpoint_settings()
-    used_mgmt = {str(v.get("host_ip") or "") for v in settings.values()}
-    used_names = set()
+    used_mgmt = {str(v.get("host_ip") or "") for v in settings.values()} | set(reserved or [])
     if role == "PROXY":
         suffix = 9
         generated = site["name"]+"-PROXY"
+        if "10.200.%d.9"%site["management_octet"] in used_mgmt: raise ValueError("PROXY .9 už je v lokalitě obsazená.")
     else:
-        if suffix < 11 or suffix > 29:
-            candidates = [x for x in range(11,30) if "10.200.%d.%d"%(site["management_octet"],x) not in used_mgmt]
-            if not candidates:
-                raise ValueError("Lokalita nemá volnou NODE management adresu .11-.29.")
-            suffix = candidates[0]
+        candidates = [x for x in range(11,30) if "10.200.%d.%d"%(site["management_octet"],x) not in used_mgmt]
+        if not candidates: raise ValueError("Lokalita nemá volnou NODE management adresu .11-.29.")
+        suffix = candidates[0]
         generated = site["name"]+"-NODE"+str(suffix-10).zfill(2)
     mgmt = "10.200.%d.%d" % (site["management_octet"], suffix)
+    target_lan = str(ipaddress.ip_address(int(net.network_address)+suffix))
     return {"name": str(name or generated).strip().upper(), "generated_name": generated, "role": role,
-            "lan_ip": str(ip), "management_ip": mgmt, "data_disk": "AUTO"}
+            "lan_ip": target_lan, "source_ip": str(ip), "management_ip": mgmt, "data_disk": "AUTO"}
 
 @app.get("/api/provisioning/sites")
 async def provisioning_sites(session=Depends(require_permission("admin"))):
@@ -430,7 +429,7 @@ async def provisioning_plan(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     p=await request.json();site=get_site(p.get("site"))
     if not site: raise HTTPException(404,"Lokalita neexistuje.")
-    try: plan=_site_plan(site,p.get("role"),p.get("lan_ip"),p.get("name") or "")
+    try: plan=_site_plan(site,p.get("role"),p.get("lan_ip"),p.get("name") or "",p.get("reserved_management_ips") or [])
     except Exception as exc: raise HTTPException(400,str(exc))
     plan.update({"site":site["name"],"public_ip":site.get("public_ip") or "","ssh_user":site.get("ssh_user") or ""})
     return plan
