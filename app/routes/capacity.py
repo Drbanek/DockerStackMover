@@ -487,16 +487,45 @@ async def cluster_dashboard(session=Depends(require_permission("dashboard_read")
         stacks_r = await c.get("/api/stacks")
         if stacks_r.status_code != 200: raise HTTPException(stacks_r.status_code, "Portainer stacks: " + stacks_r.text)
         stacks = stacks_r.json()
-    result = []
+    result = []; dashboard_stacks = []
     for endpoint in nodes:
         endpoint_id = int(endpoint["Id"])
         try: cap = await node_capacity(endpoint)
         except Exception as exc: cap = {"id": endpoint_id, "name": endpoint.get("Name"), "error": str(exc)}
-        node_stacks = [{"id": stack.get("Id"), "name": stack.get("Name"), "status": stack.get("Status"), "endpoint_id": endpoint_id} for stack in stacks if int(stack.get("EndpointId") or 0) == endpoint_id]
+        node_stacks = []
+        for stack in stacks:
+            if int(stack.get("EndpointId") or 0) != endpoint_id: continue
+            stack_id = int(stack.get("Id"))
+            item = {"id": stack_id, "name": stack.get("Name"), "status": stack.get("Status"), "endpoint_id": endpoint_id, "endpoint": endpoint.get("Name") or ("Endpoint " + str(endpoint_id)), "domains": [], "size_bytes": 0, "size_human": "0 B"}
+            try:
+                detail = await build_detail(stack_id)
+                item["domains"] = [d.get("host") for d in detail.get("domains", []) if d.get("host")]
+                volume_names = {v.get("name") for v in detail.get("volumes", []) if v.get("name")}
+                df_r = await docker_request(endpoint_id, "GET", "/system/df")
+                if df_r.status_code == 200:
+                    df = df_r.json()
+                    volume_size = 0
+                    for volume in df.get("Volumes") or []:
+                        if volume.get("Name") not in volume_names: continue
+                        size = (volume.get("UsageData") or {}).get("Size")
+                        if isinstance(size, int) and size > 0: volume_size += size
+                    image_names = {str(x.get("image") or "") for x in detail.get("containers", [])}
+                    image_size = 0
+                    for image in df.get("Images") or []:
+                        tags = image.get("RepoTags") or []
+                        if any(tag in image_names for tag in tags):
+                            image_size += int(image.get("Size") or 0)
+                    item["size_bytes"] = volume_size + image_size
+                    item["size_human"] = fmt_bytes(item["size_bytes"])
+            except Exception as exc:
+                item["size_error"] = str(exc)
+            node_stacks.append({"id": item["id"], "name": item["name"], "status": item["status"], "endpoint_id": endpoint_id})
+            dashboard_stacks.append(item)
         cap["stacks"] = sorted(node_stacks, key=lambda s: str(s.get("name", "")).lower()); result.append(cap)
     healthy = [n for n in result if not n.get("error")]; recommended = None
     if healthy: recommended = sorted(healthy, key=lambda n: (-n["ram_available_estimate"], n["cpu_percent_containers"], len(n["stacks"]), n["id"]))[0]["id"]
-    return {"nodes": result, "recommended_endpoint_id": recommended}
+    dashboard_stacks.sort(key=lambda s: str(s.get("name") or "").lower())
+    return {"nodes": result, "stacks": dashboard_stacks, "recommended_endpoint_id": recommended}
 
 @app.get("/api/nodes/capacity")
 async def nodes_capacity(session=Depends(require_permission("dashboard_read"))):
