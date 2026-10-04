@@ -30,7 +30,7 @@ async def bootstrap_portainer(request: Request, session=Depends(require_csrf)):
         if host_addr.version != 4:
             raise ValueError("IPv4 required")
         parts = host.split(".")
-        lan_ip = ".".join(parts[:3] + ["8"])
+        lan_ip = ".".join(parts[:3] + ["9"])
     except ValueError as exc:
         raise HTTPException(400, "Neplatná SSH IPv4 adresa: " + str(exc))
     wg_endpoint = lan_ip + ":51820"
@@ -71,7 +71,7 @@ fi
 PRIV=$(cat /etc/wireguard/hub.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.1.8/16
+Address = 10.200.0.1/16
 ListenPort = 51820
 PrivateKey = $PRIV
 EOF
@@ -88,11 +88,11 @@ for i in $(seq 1 45); do
   sleep 2
 done
 exit 51
-""".replace("__HOSTNAME__", shlex.quote(site + "-PORTAINER"))
+""".replace("__HOSTNAME__", shlex.quote(site + "-MGMT"))
         await __import__("asyncio").to_thread(_run, c, cmd, password, 1200)
         hub_pub = await __import__("asyncio").to_thread(_run, c, "cat /etc/wireguard/hub.pub", password)
     except Exception as exc:
-        raise HTTPException(502, "Bootstrap Portaineru selhal: " + str(exc))
+        raise HTTPException(502, "Bootstrap CONTROL serveru selhal: " + str(exc))
     finally:
         if c:
             c.close()
@@ -141,7 +141,7 @@ exit 51
         "ok": True,
         "site": site,
         "portainer_url": url,
-        "hub_management_ip": "10.200.1.8",
+        "hub_management_ip": "10.200.0.1",
         "hub_public_key": hub_pub,
         "wg_endpoint": wg_endpoint,
         "portainer_admin_user": "admin",
@@ -213,7 +213,7 @@ async def bootstrap_portainer_stream(request: Request, session=Depends(require_c
             raise ValueError("IPv4 required")
     except ValueError as exc:
         raise HTTPException(400, "Neplatná SSH IPv4 adresa: " + str(exc))
-    lan_ip = ".".join(host.split(".")[:3] + ["8"])
+    lan_ip = ".".join(host.split(".")[:3] + ["9"])
     wg_endpoint = lan_ip + ":51820"
 
     q = queue.Queue()
@@ -249,8 +249,8 @@ printf '%s|%s|%s|%s' "$IFACE" "$CIDR" "$GW" "$DNS"
             emit("network", "done", f"Cíl {lan_ip}/{prefix}, gateway {gateway}")
 
             emit("hostname", "running", "Nastavuji hostname")
-            _run(conn, "hostnamectl set-hostname " + shlex.quote(site + "-PORTAINER"), password)
-            emit("hostname", "done", site + "-PORTAINER")
+            _run(conn, "hostnamectl set-hostname " + shlex.quote(site + "-MGMT"), password)
+            emit("hostname", "done", site + "-MGMT")
 
             emit("docker", "running", "Instaluji Docker")
             _run(conn, r"""set -e
@@ -280,7 +280,7 @@ fi
 PRIV=$(cat /etc/wireguard/hub.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.1.8/16
+Address = 10.200.0.1/16
 ListenPort = 51820
 PrivateKey = $PRIV
 EOF
@@ -290,45 +290,7 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null
 systemctl enable --now wg-quick@wg-dsm
 """, password)
             hub_pub = _run(conn, "cat /etc/wireguard/hub.pub", password).strip()
-
-            # MGMT WireGuard is prepared by install.sh on the host. The app container
-            # only carries its public key to the HUB; it must never require host sudo.
-            mgmt_pub = os.environ.get("DSM_WG_PUBLIC_KEY", "").strip()
-            if not mgmt_pub:
-                raise RuntimeError("MGMT WireGuard není připraven. Aktualizuj MGMT pomocí aktuálního install.sh.")
-            peer_cmd = "wg set wg-dsm peer " + shlex.quote(mgmt_pub) + " allowed-ips 10.200.1.10/32; " + \
-                       "wg-quick save wg-dsm >/dev/null"
-            _run(conn, peer_cmd, password)
-
-            # Ask the narrow host-side broker to activate MGMT WireGuard.
-            # A bind-mounted executable would still run inside the container
-            # namespace, so it cannot configure the host. The systemd path
-            # service installed by install.sh performs the privileged action.
-            request_dir = "/host-requests"
-            if not os.path.isdir(request_dir):
-                raise RuntimeError("MGMT WireGuard request bridge chybí. Aktualizuj MGMT pomocí aktuálního install.sh.")
-            request_path = os.path.join(request_dir, "request")
-            result_path = os.path.join(request_dir, "result")
-            try:
-                os.unlink(result_path)
-            except FileNotFoundError:
-                pass
-            tmp_path = request_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                fh.write(hub_pub + "\n" + wg_endpoint + "\n")
-            os.replace(tmp_path, request_path)
-            broker_result = ""
-            for _ in range(60):
-                time.sleep(0.25)
-                try:
-                    with open(result_path, "r", encoding="utf-8") as fh:
-                        broker_result = fh.read().strip()
-                except FileNotFoundError:
-                    continue
-                break
-            if broker_result != "OK":
-                raise RuntimeError("MGMT WireGuard aktivace selhala: " + (broker_result or "host služba neodpověděla"))
-            emit("wireguard", "done", "WG HUB 10.200.1.8 + MGMT 10.200.1.10 připraveny")
+            emit("wireguard", "done", "CONTROL WireGuard HUB 10.200.0.1 připraven")
 
             emit("portainer", "running", "Instaluji Portainer Server")
             _run(conn, r"""set -e
@@ -362,7 +324,7 @@ exit 52
             emit("portainer", "done", "Portainer běží, setup token načten")
 
             if host != lan_ip:
-                emit("lan", "running", "Ověřuji a přepínám PORTAINER na " + lan_ip)
+                emit("lan", "running", "Ověřuji a přepínám CONTROL na " + lan_ip)
                 network = ipaddress.ip_network(cidr, strict=False)
                 target = ipaddress.ip_address(lan_ip)
                 if target not in network or target in (network.network_address, network.broadcast_address):
@@ -388,7 +350,7 @@ exit 52
                                  password)
                 duplicate = duplicate.strip()
                 if duplicate == "NO_ARPING":
-                    raise RuntimeError("Nelze ověřit cílovou LAN IP: na PORTAINER serveru chybí arping.")
+                    raise RuntimeError("Nelze ověřit cílovou LAN IP: na CONTROL serveru chybí arping.")
                 if duplicate.startswith("PROBE_ERROR:"):
                     raise RuntimeError("Kontrola cílové LAN IP selhala (" + duplicate + ").")
                 if duplicate != "FREE":
@@ -414,7 +376,7 @@ network:
 EOF
 chmod 600 "$NETPLAN"
 netplan generate
-nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-portainer-ip-switch.log 2>&1 &
+nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-control-ip-switch.log 2>&1 &
 """.replace("__IFACE__", iface).replace("__LAN__", lan_ip).replace("__PREFIX__", prefix).replace("__GW__", gateway).replace("__DNS__", dns_yaml)
                 _run(conn, switch, password)
                 # Do not report success merely because the asynchronous switch was scheduled.
@@ -485,7 +447,7 @@ nohup bash -c 'sleep 2; netplan apply' >/var/log/dockerstackmover-portainer-ip-s
             emit("save", "done", "Infrastruktura uložena")
             return {
                 "ok": True, "site": site, "portainer_url": url,
-                "lan_ip": lan_ip, "hub_management_ip": "10.200.1.8",
+                "lan_ip": lan_ip, "hub_management_ip": "10.200.0.1",
                 "hub_public_key": hub_pub, "wg_endpoint": wg_endpoint,
                 "portainer_admin_user": "admin",
                 "portainer_admin_password": admin_password,
