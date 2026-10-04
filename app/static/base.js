@@ -236,7 +236,7 @@ async function provisionServer(){
   host:document.getElementById("provHost").value,lan_ip:document.getElementById("provLanIp").value,management_ip:document.getElementById("provMgmtIp").value,data_disk:document.getElementById("provDataDisk").value||"AUTO",
   ssh_user:document.getElementById("provUser").value,ssh_password:document.getElementById("provPassword").value,
   hub_host:document.getElementById("provHubHost").value,hub_ssh_user:document.getElementById("provHubUser").value,hub_ssh_password:document.getElementById("provHubPassword").value,
-  hub_endpoint:document.getElementById("provHubEndpoint").value,hub_management_ip:"10.200.1.8",manager_management_ip:"10.200.1.10"};
+  hub_endpoint:document.getElementById("provHubEndpoint").value,hub_management_ip:"10.200.0.1",manager_management_ip:"10.200.0.1"};
  if(!payload.host||!payload.lan_ip||!payload.management_ip||!payload.ssh_password||!payload.hub_ssh_password){alert("Vyplň SSH adresu, LAN/management IP a obě SSH hesla.");return}
  if(!confirm("Připravit "+(payload.name||payload.host)+"?\n\nPo ověření WireGuardu budou porty 9001/9100 dostupné pouze přes management overlay."))return;
  b.disabled=true;renderProvisionProgress(state,payload.role);
@@ -258,7 +258,7 @@ async function bootstrapFirstPortainer(){
  const b=document.getElementById("bootButton"),state=document.getElementById("bootState");
  const p={site:document.getElementById("bootSite").value.trim(),host:document.getElementById("bootHost").value.trim(),ssh_user:document.getElementById("bootUser").value.trim(),ssh_password:document.getElementById("bootPassword").value};
  if(!p.site||!p.host||!p.ssh_user||!p.ssh_password){state.className="error";state.textContent="Vyplň název lokality, SSH adresu, uživatele a heslo.";return}
- if(!confirm("Připravit první infrastrukturu "+p.site.toUpperCase()+" na serveru "+p.host+"?\n\nDockerStackMover automaticky nastaví PORTAINER na .8, Docker, WireGuard HUB a Portainer Server."))return;
+ if(!confirm("Připravit první infrastrukturu "+p.site.toUpperCase()+" na serveru "+p.host+"?\n\nDockerStackMover automaticky připraví CONTROL/MGMT na .9, Docker, WireGuard HUB 10.200.0.1 a Portainer Server."))return;
 
  const steps=[
   ["ssh","SSH připojení"],
@@ -266,13 +266,13 @@ async function bootstrapFirstPortainer(){
   ["network","Síťová konfigurace"],
   ["hostname","Hostname"],
   ["docker","Docker"],
-  ["wireguard","WireGuard HUB 10.200.1.8"],
+  ["wireguard","WireGuard HUB 10.200.0.1"],
   ["portainer","Portainer Server"],
-  ["lan","LAN IP .8"],
+  ["lan","LAN IP .9"],
   ["api","Inicializace Portainer API"],
   ["save","Uložení infrastruktury"]
  ];
- state.className="";state.innerHTML='<div style="font-weight:700;margin-bottom:8px">Příprava '+esc(p.site.toUpperCase())+'-PORTAINER</div>'+
+ state.className="";state.innerHTML='<div style="font-weight:700;margin-bottom:8px">Příprava '+esc(p.site.toUpperCase())+'-MGMT</div>'+
   steps.map(([id,label])=>'<div id="bootStep-'+id+'" style="padding:4px 0"><span class="bootMark">○</span> '+esc(label)+'<span class="muted bootDetail"></span></div>').join('')+
   '<div id="bootProgress" class="muted" style="margin-top:10px">0 / '+steps.length+' hotovo</div>';
  let done=new Set();
@@ -303,7 +303,7 @@ async function bootstrapFirstPortainer(){
   }
   if(!result)throw new Error("Bootstrap skončil bez výsledku.");
   const ok=document.createElement("div");ok.className="ready";ok.style.marginTop="14px";
-  ok.innerHTML="✓ První infrastruktura je připravena<br>PORTAINER LAN: <strong>"+esc(result.lan_ip)+"</strong><br>Management: <strong>"+esc(result.hub_management_ip)+"</strong><br>Portainer: "+esc(result.portainer_url)+"<br><strong>Jednorázové Portainer admin heslo:</strong> <code>"+esc(result.portainer_admin_password)+"</code>";
+  ok.innerHTML="✓ První infrastruktura je připravena<br>CONTROL LAN: <strong>"+esc(result.lan_ip)+"</strong><br>Management: <strong>"+esc(result.hub_management_ip)+"</strong><br>Portainer: "+esc(result.portainer_url)+"<br><strong>Jednorázové Portainer admin heslo:</strong> <code>"+esc(result.portainer_admin_password)+"</code>";
   state.appendChild(ok);
   document.getElementById("bootPassword").value="";
   document.getElementById("provSite").value=p.site.toUpperCase();
