@@ -1,10 +1,12 @@
 const migrationPlannedSteps=["Příprava","Kontrola kolizí","Zastavení zdroje","Snapshot před migrací","Persistentní volumes","Vytvoření stacku","Ověření cíle","Proxy cutover","DNS cutover","Dokončení"];
 function migrationDisplaySteps(job){
- const actual=job.steps||[],byName=new Map(actual.map(s=>[s.name,s])),volumeSteps=actual.filter(s=>String(s.name||"").startsWith("Volume: "));
+ const actual=job.steps||[],byName=new Map(actual.map(s=>[s.name,s])),volumeSteps=actual.filter(s=>String(s.name||"").startsWith("Volume: ")),resultVolumes=Array.isArray(job.result&&job.result.volumes)?job.result.volumes:[];
  const out=[];
  migrationPlannedSteps.forEach(function(name){
   if(name==="Persistentní volumes"){
    if(volumeSteps.length)volumeSteps.forEach(s=>out.push(s));
+   else if(resultVolumes.length)out.push({name:"Persistentní volumes",state:"ok",message:"Přeneseno "+resultVolumes.length+" · "+resultVolumes.join(", ")});
+   else if(actual.some(s=>s.name==="Snapshot před migrací"&&s.state!=="skipped"))out.push({name:"Persistentní volumes",state:"running",message:"Přenos persistentních volumes probíhá"});
    else out.push({name:"Persistentní volumes",state:"skipped",message:"Není potřeba · stack nemá persistentní volumes"});
   }else{
    let step=byName.get(name);
