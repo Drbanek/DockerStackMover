@@ -13,9 +13,9 @@ MGMT_IP=${CURRENT_CIDR%/*}
 PREFIX=${CURRENT_CIDR#*/}
 [[ -n "$MGMT_IP" && -n "$PREFIX" ]] || { echo "Unable to detect management IPv4."; exit 1; }
 
-# DSM address convention: MGMT always uses host address .10 in the detected IPv4 subnet.
+# DSM 2.1 address convention: CONTROL/MGMT always uses host address .9.
 IFS=. read -r OCT1 OCT2 OCT3 _ <<<"$MGMT_IP"
-TARGET_IP="$OCT1.$OCT2.$OCT3.10"
+TARGET_IP="$OCT1.$OCT2.$OCT3.9"
 
 echo "DockerStackMover · first MGMT bootstrap"
 echo "Detected address: $MGMT_IP/$PREFIX"
@@ -33,91 +33,30 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 systemctl enable --now docker
 
-# MGMT is always a WireGuard management peer. Prepare its persistent identity
-# on the host now; the HUB peer is added later by the first-infrastructure flow.
+# CONTROL/MGMT is the central WireGuard HUB. It is not a Site 1 peer.
 apt-get update
 apt-get install -y wireguard
 install -d -m 700 /etc/wireguard
-if [[ ! -f /etc/wireguard/dsm-mgmt.key ]]; then
+if [[ ! -f /etc/wireguard/hub.key ]]; then
   umask 077
-  wg genkey | tee /etc/wireguard/dsm-mgmt.key | wg pubkey >/etc/wireguard/dsm-mgmt.pub
+  wg genkey | tee /etc/wireguard/hub.key | wg pubkey >/etc/wireguard/hub.pub
 fi
-chmod 600 /etc/wireguard/dsm-mgmt.key
-chmod 644 /etc/wireguard/dsm-mgmt.pub
-MGMT_WG_PUBLIC_KEY=$(cat /etc/wireguard/dsm-mgmt.pub)
-
-# Narrow host helper: only accepts a WireGuard public key and IPv4:port endpoint,
-# writes the fixed MGMT address 10.200.1.10/16 and starts wg-dsm.
-install -d -m 755 /opt/dockerstackmover-host-tools
-cat >/opt/dockerstackmover-host-tools/configure-mgmt-wireguard <<'DSMHELPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-HUB_PUB="${1:-}"
-ENDPOINT="${2:-}"
-[[ "$HUB_PUB" =~ ^[A-Za-z0-9+/]{43}=$ ]] || { echo "Invalid HUB public key" >&2; exit 2; }
-[[ "$ENDPOINT" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]{1,5}$ ]] || { echo "Invalid HUB endpoint" >&2; exit 3; }
-PRIV=$(cat /etc/wireguard/dsm-mgmt.key)
+chmod 600 /etc/wireguard/hub.key
+chmod 644 /etc/wireguard/hub.pub
+HUB_WG_PUBLIC_KEY=$(cat /etc/wireguard/hub.pub)
+HUB_WG_PRIVATE_KEY=$(cat /etc/wireguard/hub.key)
 cat >/etc/wireguard/wg-dsm.conf <<EOF
 [Interface]
-Address = 10.200.1.10/16
-PrivateKey = $PRIV
-
-[Peer]
-PublicKey = $HUB_PUB
-Endpoint = $ENDPOINT
-AllowedIPs = 10.200.0.0/16
-PersistentKeepalive = 25
+Address = 10.200.0.1/16
+ListenPort = 51820
+PrivateKey = $HUB_WG_PRIVATE_KEY
+PostUp = iptables -C FORWARD -i wg-dsm -o wg-dsm -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i wg-dsm -o wg-dsm -j ACCEPT
+PostDown = iptables -D FORWARD -i wg-dsm -o wg-dsm -j ACCEPT 2>/dev/null || true
 EOF
 chmod 600 /etc/wireguard/wg-dsm.conf
-systemctl enable wg-quick@wg-dsm >/dev/null
-systemctl restart wg-quick@wg-dsm
-ip -4 addr show dev wg-dsm | grep -q '10.200.1.10/16'
-DSMHELPER
-chmod 755 /opt/dockerstackmover-host-tools/configure-mgmt-wireguard
-
-# Narrow privilege bridge for the app container. The container can only submit
-# a two-line WireGuard request; this host service validates it and invokes the
-# fixed helper. No Docker socket, sudo, or host namespace is exposed.
-install -d -m 0755 /opt/dockerstackmover-host-requests
-cat >/usr/local/sbin/dockerstackmover-wg-request-handler <<'DSMBROKER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-REQ=/opt/dockerstackmover-host-requests/request
-RES=/opt/dockerstackmover-host-requests/result
-[[ -f "$REQ" ]] || exit 0
-mapfile -t LINES <"$REQ"
-rm -f "$REQ"
-if [[ "${#LINES[@]}" -ne 2 ]]; then
-  printf 'ERROR invalid request\n' >"$RES"; exit 0
-fi
-HUB_PUB="${LINES[0]}"
-ENDPOINT="${LINES[1]}"
-if OUT=$(/opt/dockerstackmover-host-tools/configure-mgmt-wireguard "$HUB_PUB" "$ENDPOINT" 2>&1); then
-  printf 'OK\n' >"$RES"
-else
-  printf 'ERROR %s\n' "${OUT: -300}" >"$RES"
-fi
-DSMBROKER
-chmod 0755 /usr/local/sbin/dockerstackmover-wg-request-handler
-cat >/etc/systemd/system/dockerstackmover-wg-request.service <<'EOF'
-[Unit]
-Description=DockerStackMover MGMT WireGuard request handler
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/dockerstackmover-wg-request-handler
-EOF
-cat >/etc/systemd/system/dockerstackmover-wg-request.path <<'EOF'
-[Unit]
-Description=Watch DockerStackMover MGMT WireGuard requests
-[Path]
-PathExists=/opt/dockerstackmover-host-requests/request
-Unit=dockerstackmover-wg-request.service
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable --now dockerstackmover-wg-request.path
-
+printf 'net.ipv4.ip_forward=1\n' >/etc/sysctl.d/99-dockerstackmover-wg-forward.conf
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+systemctl enable --now wg-quick@wg-dsm
 
 # Narrow self-update helper. The web app can only request a fixed update of
 # /opt/dockerstackmover using the published GHCR :latest image.
@@ -199,7 +138,7 @@ cat >/opt/dockerstackmover/.env <<EOF
 MOVER_BIND_IP=$MGMT_IP
 MOVER_PREFIX=$PREFIX
 MOVER_PORT=8082
-DSM_WG_PUBLIC_KEY=$MGMT_WG_PUBLIC_KEY
+DSM_WG_PUBLIC_KEY=$HUB_WG_PUBLIC_KEY
 EOF
 chmod 600 /opt/dockerstackmover/.env
 cd /opt/dockerstackmover
@@ -208,7 +147,7 @@ docker compose up -d
 
 for _ in $(seq 1 30); do
   if curl -fsS "http://$MGMT_IP:8082/api/setup/status" >/dev/null 2>&1; then
-    # Final step: switch MGMT to the DSM-standard .10 address.
+    # Final step: switch CONTROL/MGMT to the DSM-standard .9 address.
     if [[ "$MGMT_IP" != "$TARGET_IP" ]]; then
       if ping -c 1 -W 1 "$TARGET_IP" >/dev/null 2>&1; then
         echo "ERROR: Target MGMT address $TARGET_IP is already in use; IP was not changed." >&2
