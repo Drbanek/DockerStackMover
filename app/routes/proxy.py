@@ -311,7 +311,11 @@ async def _choose_proxy_service(detail):
         port = _detect_container_port(container)
         if port:
             candidates.append((_container_service_name(container), port))
-    candidates = [(s,p) for s,p in candidates if s]
+    # Only web-facing ports are valid reverse-proxy candidates. Database,
+    # cache and other infrastructure ports (e.g. MariaDB 3306) must never make
+    # HTTP service auto-detection ambiguous.
+    http_ports = {80, 443, 3000, 5000, 8000, 8080, 8081, 8888}
+    candidates = [(s,p) for s,p in candidates if s and p in http_ports]
     unique = []
     for item in candidates:
         if item not in unique:
