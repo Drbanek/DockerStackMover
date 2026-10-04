@@ -10,7 +10,7 @@ import uuid
 import paramiko
 from fastapi import Depends, HTTPException, Request
 
-from ..core import app, require_csrf, user_permissions, client, save_endpoint_setting
+from ..core import app, require_csrf, require_permission, user_permissions, client, save_endpoint_setting, get_endpoint_settings, get_sites, get_site, save_site, next_management_octet, setting_get
 
 
 def _ssh(host, port, username, password):
@@ -354,6 +354,96 @@ docker port portainer_agent 9001/tcp | grep -q 9001"""
 
 
 
+def _site_plan(site, role, lan_ip, name=""):
+    role = str(role or "NODE").upper()
+    if role not in ("NODE","PROXY"):
+        raise ValueError("Podporovaná role je NODE nebo PROXY.")
+    net = ipaddress.ip_network(site["lan_cidr"], strict=False)
+    ip = ipaddress.ip_address(lan_ip)
+    if ip not in net:
+        raise ValueError("LAN IP není v rozsahu lokality "+site["lan_cidr"])
+    suffix = int(str(ip).split(".")[-1])
+    settings = get_endpoint_settings()
+    used_mgmt = {str(v.get("host_ip") or "") for v in settings.values()}
+    used_names = set()
+    if role == "PROXY":
+        suffix = 9
+        generated = site["name"]+"-PROXY"
+    else:
+        if suffix < 11 or suffix > 29:
+            candidates = [x for x in range(11,30) if "10.200.%d.%d"%(site["management_octet"],x) not in used_mgmt]
+            if not candidates:
+                raise ValueError("Lokalita nemá volnou NODE management adresu .11-.29.")
+            suffix = candidates[0]
+        generated = site["name"]+"-NODE"+str(suffix-10).zfill(2)
+    mgmt = "10.200.%d.%d" % (site["management_octet"], suffix)
+    return {"name": str(name or generated).strip().upper(), "generated_name": generated, "role": role,
+            "lan_ip": str(ip), "management_ip": mgmt, "data_disk": "AUTO"}
+
+@app.get("/api/provisioning/sites")
+async def provisioning_sites(session=Depends(require_permission("admin"))):
+    return {"sites": get_sites(), "next_management_octet": next_management_octet()}
+
+@app.post("/api/provisioning/sites")
+async def provisioning_site_save(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
+    p=await request.json()
+    name=str(p.get("name") or "").strip().upper()
+    lan=str(p.get("lan_cidr") or "").strip()
+    if not name or not lan: raise HTTPException(400,"Vyplň název a LAN subnet lokality.")
+    try:
+        net=ipaddress.ip_network(lan,strict=False)
+        if net.version!=4: raise ValueError()
+        octet=int(p.get("management_octet") or next_management_octet())
+        if octet<1 or octet>254: raise ValueError()
+        site=save_site(name,str(net),octet,p.get("public_ip") or "",p.get("ssh_user") or "")
+    except Exception as exc:
+        raise HTTPException(400,"Neplatná nebo kolidující lokalita: "+str(exc))
+    return {"site":site}
+
+@app.get("/api/provisioning/discovery/{site_name}")
+async def provisioning_discovery(site_name: str, session=Depends(require_permission("admin"))):
+    site=get_site(site_name)
+    if not site: raise HTTPException(404,"Lokalita neexistuje.")
+    net=ipaddress.ip_network(site["lan_cidr"],strict=False)
+    if net.num_addresses>256: raise HTTPException(400,"Discovery je omezené na /24 nebo menší subnet.")
+    settings=get_endpoint_settings()
+    known={str(v.get("lan_ip") or "") for v in settings.values()}
+    sem=asyncio.Semaphore(64)
+    async def check(ip):
+        async with sem:
+            try:
+                _,w=await asyncio.wait_for(asyncio.open_connection(str(ip),22),0.35)
+                w.close()
+                try: await w.wait_closed()
+                except Exception: pass
+                return {"ip":str(ip),"ssh":True,"provisioned":str(ip) in known}
+            except Exception: return None
+    found=await asyncio.gather(*(check(ip) for ip in net.hosts()))
+    return {"site":site,"hosts":[x for x in found if x]}
+
+@app.post("/api/provisioning/plan")
+async def provisioning_plan(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
+    p=await request.json();site=get_site(p.get("site"))
+    if not site: raise HTTPException(404,"Lokalita neexistuje.")
+    try: plan=_site_plan(site,p.get("role"),p.get("lan_ip"),p.get("name") or "")
+    except Exception as exc: raise HTTPException(400,str(exc))
+    plan.update({"site":site["name"],"public_ip":site.get("public_ip") or "","ssh_user":site.get("ssh_user") or ""})
+    return plan
+
+def _hydrate_v2_payload(payload):
+    site=get_site(payload.get("site"))
+    if not site: return payload
+    plan=_site_plan(site,payload.get("role"),payload.get("host") or payload.get("lan_ip"),payload.get("name") or "")
+    p=dict(payload);p.update(plan)
+    p["site"]=site["name"];p["public_ip"]=site.get("public_ip") or ""
+    p["ssh_user"]=str(p.get("ssh_user") or site.get("ssh_user") or "")
+    p["hub_host"]=str(p.get("hub_host") or setting_get("provisioning_hub_host","")).strip()
+    p["hub_ssh_user"]=str(p.get("hub_ssh_user") or setting_get("provisioning_hub_ssh_user","")).strip()
+    p["hub_endpoint"]=str(p.get("hub_endpoint") or setting_get("provisioning_hub_endpoint","")).strip()
+    return p
+
 PROVISION_STEPS = [
     ("ssh","SSH připojení"), ("preflight","Pre-flight kontrola"), ("lan","LAN konfigurace"),
     ("wg_key","WireGuard klíče"), ("wg_peer","Registrace peeru na MAIN"),
@@ -367,7 +457,7 @@ PROVISION_STEPS = [
 async def provision_server_stream(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")):
         raise HTTPException(403,"Permission denied")
-    payload=await request.json()
+    payload=_hydrate_v2_payload(await request.json())
     q=queue.Queue()
     loop=asyncio.get_running_loop()
     def emit(step,status="done",detail=""):
