@@ -107,8 +107,25 @@ nohup sh -c 'sleep 2; netplan apply' >/tmp/dsm-netplan.log 2>&1 &"""
             host=lan_ip
             steps.append("LAN IP changed to "+lan_ip); progress("lan","done","LAN IP changed to "+lan_ip)
         if host == lan_ip: progress("lan","done","LAN IP už je nastavena: "+lan_ip)
+        progress("wg_key","running","Čekám na dokončení automatických aktualizací systému…")
+        apt_wait = """deadline=$((SECONDS+300))
+while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "Timeout: APT/dpkg je stále používán jiným procesem po 300 s." >&2
+    exit 75
+  fi
+  sleep 3
+done
+while dpkg --audit 2>/dev/null | grep -q .; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "Timeout: dpkg není po 300 s v konzistentním stavu." >&2
+    exit 76
+  fi
+  sleep 3
+done"""
+        _run(target,apt_wait,password,330)
         progress("wg_key","running","Instaluji balíčky a připravuji WireGuard klíče…")
-        _run(target,"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard ca-certificates curl nftables",password,600)
+        _run(target,"apt-get -o DPkg::Lock::Timeout=300 update && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y wireguard ca-certificates curl nftables",password,900)
         _run(target,"install -d -m 700 /etc/wireguard; if [ ! -f /etc/wireguard/dsm.key ]; then umask 077; wg genkey | tee /etc/wireguard/dsm.key | wg pubkey > /etc/wireguard/dsm.pub; fi",password)
         peer_pub=_run(target,"cat /etc/wireguard/dsm.pub",password)
         steps.append("WireGuard keypair OK"); progress("wg_key","done","WireGuard keypair OK")
@@ -190,8 +207,8 @@ fi
 [ "$DISK" != "$ROOT_DISK" ] || { echo "Odmítám použít systémový disk $DISK" >&2; exit 43; }
 [ -z "$(lsblk -nrpo MOUNTPOINTS "$DISK" | tr -d '[:space:]')" ] || { echo "DATA disk $DISK obsahuje připojený oddíl" >&2; exit 44; }
 [ -z "$(lsblk -nrpo FSTYPE "$DISK" | tr -d '[:space:]')" ] || { echo "DATA disk $DISK obsahuje filesystem; odmítám automatické smazání" >&2; exit 45; }
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y xfsprogs parted
+apt-get -o DPkg::Lock::Timeout=300 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y xfsprogs parted
 wipefs -a "$DISK"
 parted -s "$DISK" mklabel gpt mkpart primary xfs 0% 100%
 partprobe "$DISK"; sleep 2
@@ -212,7 +229,7 @@ echo "CREATED $DISK -> $PART -> /srv"
             disk_detail=disk_result.splitlines()[-1]
             steps.append("DATA disk OK: "+disk_detail); progress("data_disk","done","DATA disk OK: "+disk_detail)
         progress("docker","running","Instaluji/opravuji Docker a Portainer Agent…")
-        docker="""if ! command -v docker >/dev/null; then install -m 0755 -d /etc/apt/keyrings; curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc; chmod a+r /etc/apt/keyrings/docker.asc; . /etc/os-release; echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" >/etc/apt/sources.list.d/docker.list; apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi
+        docker="""if ! command -v docker >/dev/null; then install -m 0755 -d /etc/apt/keyrings; curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc; chmod a+r /etc/apt/keyrings/docker.asc; . /etc/os-release; echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" >/etc/apt/sources.list.d/docker.list; apt-get -o DPkg::Lock::Timeout=300 update; DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; fi
 systemctl enable --now docker
 # Repair-safe: never restart Docker on an existing NODE; that would interrupt workloads.
 # If Docker was just installed, enable --now already started it.
