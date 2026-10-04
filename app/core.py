@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.18.0"
 import re
 import httpx
 import asyncio
@@ -130,6 +130,15 @@ def init_db():
             conn.execute("ALTER TABLE endpoint_settings ADD COLUMN role TEXT NOT NULL DEFAULT 'NONE'")
         if "lan_ip" not in columns:
             conn.execute("ALTER TABLE endpoint_settings ADD COLUMN lan_ip TEXT")
+        conn.execute("""CREATE TABLE IF NOT EXISTS sites (
+            name TEXT PRIMARY KEY,
+            lan_cidr TEXT NOT NULL,
+            management_octet INTEGER NOT NULL UNIQUE,
+            public_ip TEXT,
+            ssh_user TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""")
         conn.execute("CREATE TABLE IF NOT EXISTS stack_proxy_settings (stack_name TEXT PRIMARY KEY, host TEXT NOT NULL, service TEXT, container_port INTEGER, backend_port INTEGER, https INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS app_users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, updated_at TEXT NOT NULL)")
@@ -138,6 +147,32 @@ def init_db():
             conn.execute("ALTER TABLE app_users ADD COLUMN permissions TEXT NOT NULL DEFAULT 'dashboard_read,migrations,dns_read,dns_write,admin'")
         if "enabled" not in user_cols:
             conn.execute("ALTER TABLE app_users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+
+def get_sites():
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM sites ORDER BY management_octet, name").fetchall()
+    return [dict(r) for r in rows]
+
+def get_site(name):
+    with db() as conn:
+        row = conn.execute("SELECT * FROM sites WHERE upper(name)=upper(?)", (str(name or "").strip(),)).fetchone()
+    return dict(row) if row else None
+
+def next_management_octet():
+    with db() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(management_octet), 1) AS value FROM sites").fetchone()
+    return max(2, int(row["value"] or 1) + 1)
+
+def save_site(name, lan_cidr, management_octet, public_ip="", ssh_user=""):
+    name = str(name or "").strip().upper()
+    with db() as conn:
+        conn.execute("""INSERT INTO sites(name,lan_cidr,management_octet,public_ip,ssh_user,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET lan_cidr=excluded.lan_cidr,
+            management_octet=excluded.management_octet, public_ip=excluded.public_ip,
+            ssh_user=excluded.ssh_user, updated_at=excluded.updated_at""",
+            (name, str(lan_cidr).strip(), int(management_octet), str(public_ip or "").strip(),
+             str(ssh_user or "").strip(), utcnow(), utcnow()))
+    return get_site(name)
 
 def get_endpoint_settings():
     with db() as conn:
