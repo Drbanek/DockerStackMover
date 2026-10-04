@@ -5,7 +5,7 @@ set -Eeuo pipefail
 WG_IF=wg-dsm
 WG_DIR=/etc/wireguard
 WG_CONF=$WG_DIR/$WG_IF.conf
-WG_ADDR=${WG_ADDR:-10.200.0.8/16}
+WG_ADDR=${WG_ADDR:-10.200.1.8/16}
 WG_PORT=${WG_PORT:-51820}
 
 init_hub() {
