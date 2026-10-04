@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -72,5 +72,14 @@ jobs:
             ${{ startsWith(github.ref, 'refs/tags/v') && format('ghcr.io/drbanek/dockerstackmover-capacity-agent:{0}', github.ref_name) || '' }}
           cache-from: type=gha,scope=capacity-agent
           cache-to: type=gha,mode=max,scope=capacity-agent
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "DockerStackMover ${GITHUB_REF_NAME}" \
+            --notes-file RELEASE-2.0.0.md
 
 # publish trigger: v1.13.20

@@ -1,95 +1,136 @@
-# DockerStackMover
+# DockerStackMover 2.0
 
 **Čeština** | [English](README.en.md)
 
-DockerStackMover je lehký nástroj pro bezpečnou migraci samostatných Docker Compose stacků mezi endpointy v Portaineru. Přenáší named volumes, provádí kontroly před migrací a umožňuje návrat zpět pomocí rollbacku.
+DockerStackMover (DSM) je webový management a migrační systém pro Docker Compose infrastrukturu nad Portainerem. Verze 2.0 spojuje provisioning serverů, správu lokalit, WireGuard management, monitoring kapacity, migraci stacků a persistentních dat, proxy/DNS cutover, snapshoty a rollback do jednoho rozhraní.
 
-## Funkce
+> V2 princip: DSM migraci řídí, ale velká data netečou přes MGMT. Persistentní volumes se mezi NODE servery kopírují přímo přes LAN nebo WireGuard.
 
-- přehled Portainer endpointů a stacků
-- libovolné názvy endpointů bez závislosti na pojmenování NODE/DC
-- explicitní výběr endpointů povolených pro migrace
-- volitelná Host IP pro Agent/Edge/non-TCP endpointy
-- volitelná Public IP endpointu pro cross-site DNS cutover
-- integrace Váš Hosting DNS: pre-flight kontrola, automatický A-record cutover po healthchecku a obnova DNS při rollbacku
-- přehled clusteru a kapacity endpointů
-- doporučení cílového endpointu podle kapacity
+## Hlavní funkce v2.0
+
+- bootstrap MGMT a webový first-run setup
+- příprava první infrastruktury a Portaineru z UI
+- více lokalit, SSH discovery a provisioning NODE/PROXY
+- role MGMT, PORTAINER/MAIN, PROXY a NODE
+- automatická instalace Dockeru, Portainer Agentu, Capacity Agentu a Traefiku podle role
+- centrální WireGuard management síť a management firewall
+- DATA disk /srv, XFS project quota a Docker persistentní volumes na /srv/docker-volumes
+- dashboard stacků/NODE a kapacitní monitoring
+- Server Readiness kontroly
 - pre-flight kontrola kolizí stacků, volumes a portů
-- migrace named volumes přes Docker Archive API
-- automatický přepis Host IP u publikovaných portů
-- kontrola cílových kontejnerů/health checků s timeoutem 120 sekund
-- automatické obnovení zdroje při chybě migrace
-- ruční potvrzení nebo rollback po úspěšné migraci
-- persistentní historie migrací v SQLite
-- zámek proti souběžné migraci stejného stacku
-- přihlášení, session a CSRF ochrana
+- automatický Host IP rewrite při migraci
+- snapshot persistentních volumes před migrací
+- přímý NODE → NODE přenos: LAN ve stejné lokalitě, WireGuard mezi lokalitami
+- předběžné změření volumes, živé MB a progress bar po 0,5 s; dokončený krok vždy 100 %
+- vytvoření cílového stacku a kontrola container/health stavu
+- Traefik proxy cutover a volitelný Váš Hosting DNS cutover
+- automatické obnovení zdroje při chybě
+- explicitní potvrzení nebo rollback po úspěšné migraci
+- historie migrací/snapshotů v SQLite
+- uživatelé, oprávnění, session a CSRF ochrana
+- samoaktualizace z GHCR
+- čeština / angličtina
 
-## Struktura projektu
+## Doporučená struktura
 
-```text
-app/
-├── main.py
-├── core.py
-├── routes/
-│   ├── general.py
-│   ├── migration.py
-│   └── capacity.py
-└── static/
-    ├── index.html
-    ├── style.css
-    ├── base.js
-    ├── stacks.js
-    └── migrations.js
-```
+~~~text
+Internet -> veřejná IP -> PROXY (.9 / Traefik) -> NODE (.11-.29)
+                         |
+MGMT (.10) -> PORTAINER/MAIN (.8) -> management WireGuard -> všechny lokality
 
-## Požadavky
+NODE:
+SYSTEM disk -> /var/lib/docker (engine, images, overlay)
+DATA disk   -> /srv/docker-volumes
+               ^ bind mount do /var/lib/docker/volumes
+~~~
 
-- Docker Engine + Docker Compose
-- Portainer s API klíčem s přístupem k požadovaným endpointům/stackům
-- dostupné Portainer endpointy
-- cílové endpointy explicitně povolené v rozhraní Moveru
+Adresní konvence: PORTAINER/MAIN .8, PROXY .9, MGMT .10, NODE .11-.29. WireGuard používá management rozsah 10.200.<lokalita>.<suffix>. Každá lokalita může mít vlastní PROXY a produkční LAN nemusí být mezi lokalitami routovaná.
 
-## Instalace
+## Storage model NODE
 
-```bash
-git clone https://github.com/Drbanek/DockerStackMover.git
-cd DockerStackMover
-cp .env.example .env
-```
+Persistentní data jsou fyzicky na DATA disku. Docker dál používá standardní named volumes díky bind mountu:
 
-Upravte `.env`, zejména `PORTAINER_URL`, `PORTAINER_TOKEN`, `MOVER_PASSWORD` a `MOVER_SESSION_SECRET`. Pro volitelnou integraci Váš Hosting nastavte také `VAS_HOSTING_API_KEY`; API klíč nikdy neukládejte do repozitáře.
+~~~text
+/srv/docker-volumes /var/lib/docker/volumes none bind 0 0
+~~~
 
-```bash
-docker compose up -d --build
-```
+Provisioning připravuje DATA disk jako XFS s project quota. SYSTEM disk zůstává pro Docker engine, image, container layers a cache.
 
-Výchozí konfigurace publikuje rozhraní na `127.0.0.1:8081`. Pomocí `MOVER_BIND_IP` lze nastavit adresu, na které má služba poslouchat.
+## Jak probíhá migrace
 
-Podrobný český návod pro build, GHCR, Portainer a migrace je v [docs/KOMPILACE-DOCKER.md](docs/KOMPILACE-DOCKER.md).
+1. Pre-flight cíle a kontrola kolizí.
+2. Změření persistentních volumes.
+3. Zastavení zdrojového stacku.
+4. Lokální snapshot volumes na zdrojovém NODE.
+5. Vytvoření cílových volumes.
+6. Přímý NODE → NODE přenos; LAN uvnitř lokality, WireGuard mezi lokalitami.
+7. Live MB/celkem MB a procentní progress.
+8. Vytvoření cílového Portainer stacku a Host IP rewrite.
+9. Ověření containerů a healthchecku.
+10. Proxy cutover a podle konfigurace DNS cutover.
+11. Zdroj zůstává zastavený pro rollback.
+12. Správce zvolí Potvrdit migraci nebo Vrátit zpět.
 
-## Nastavení endpointů
+Velká data nejdou přes DSM backend. Helper kontejnery na NODE používají stream tar | nc | tar. Při chybě se DSM pokusí obnovit původní zdroj.
 
-Po přihlášení povolte pouze Docker endpointy, které mají být součástí migračního poolu. Názvy endpointů jsou pouze informativní a mohou být libovolné.
+## První nasazení
 
-U běžného `tcp://host:port` endpointu Mover zjistí Host IP automaticky. U Portainer Agent, Edge, DNS nebo jiného typu lze Host IP zadat ručně. Pro migrace mezi lokalitami lze každému endpointu nastavit také `Public IP`, na kterou se má po úspěšném healthchecku přepnout DNS.
+Na čistém Ubuntu Serveru určeném pro MGMT:
 
-## Průběh migrace
+~~~bash
+curl -fsSL https://raw.githubusercontent.com/Drbanek/DockerStackMover/main/install.sh | sudo bash
+~~~
 
-Mover zastaví zdrojový stack, přenese named volumes, vytvoří stack na cíli, ověří cílové kontejnery a původní stack ponechá zastavený pro případný rollback. Teprve explicitní potvrzení migrace odstraní původní kopii.
+Instalátor připraví Docker, WireGuard identitu MGMT, bezpečné host helpery, DSM z GHCR a standardizuje MGMT na LAN suffix .10. UI je standardně na portu 8082. Při změně IP může být SSH spojení ukončeno; pokračuje se na nové .10 adrese.
 
-## Migrace mezi lokalitami
+Po prvním přihlášení vytvoř administrátora a v Nastavení → Infrastruktura připrav první PORTAINER/MAIN. Další lokality a NODE/PROXY se nasazují přes Provisioning infrastruktury V2.
 
-Endpointy nemusí být ve stejné LAN. Mohou být propojené privátní sítí/VPN nebo vhodně zabezpečeným veřejným spojením. Pro nezávislé lokality je vhodné mít v každé lokalitě vlastní reverse proxy.
+## Provisioning
 
-Pokud je nastaven `VAS_HOSTING_API_KEY` a zdrojový i cílový endpoint mají vyplněnou rozdílnou `Public IP`, Mover před migrací ověří aktuální A záznam proxy domény. Po úspěšném healthchecku cíle přepne A záznam přes Váš Hosting API. Při rollbacku obnoví původní hodnotu DNS. Pokud DNS integrace nebo Public IP nejsou nastavené, migrace pokračuje bez změny DNS.
+Lokalita obsahuje název, LAN subnet, management octet, volitelnou veřejnou IP a SSH uživatele. DSM umí vyhledat SSH servery, identifikovat je, zkontrolovat disky a provisioning provést pro více vybraných serverů.
 
-## Bezpečnost
+NODE provisioning zahrnuje LAN/hostname, WireGuard, DATA disk, Docker, Portainer Agent, Capacity Agent, firewall, test management cesty a registraci endpointu do Portaineru.
 
-Nikdy neukládejte `.env`, Portainer API token, heslo ani session secret do repozitáře. `MOVER_SESSION_SECRET` musí mít alespoň 32 znaků. Aktuální verze používá pro spojení s Portainerem `verify=False`; Mover proto provozujte v důvěryhodné management síti, dokud nebude TLS ověřování upraveno.
+## Síť, proxy a DNS
 
-## Verze 1.0.0
+Management služby jsou omezené vlastní nftables tabulkou. Typicky Portainer Agent používá TCP/9001, Capacity Agent TCP/9100 a DSM UI TCP/8082. DSM záměrně nenačítá globální nftables ruleset, aby nepoškodil Docker DOCKER-* chains.
 
-v1.0.0 představuje otestovaný základ migračního enginu: migrace stacku a persistentních volumes, Host IP rewrite, pre-flight kontroly, ověření cíle, historie, potvrzení migrace a rollback.
+PROXY používá Traefik. Při cross-site migraci může DSM po healthchecku změnit A záznam přes Váš Hosting API; rollback obnoví původní DNS.
+
+## Aktualizace
+
+~~~bash
+sudo bash -c 'cd /opt/dockerstackmover && docker compose pull dockerstackmover && docker compose up -d --no-deps dockerstackmover'
+~~~
+
+Aktualizaci lze spustit také z Nastavení → Systém.
+
+## CI / GHCR
+
+Push do main validuje Python, shell skripty a Compose, sestaví DSM + Capacity Agent a publikuje latest a sha image. Tag v2.0.0 navíc publikuje:
+
+~~~text
+ghcr.io/drbanek/dockerstackmover:v2.0.0
+ghcr.io/drbanek/dockerstackmover-capacity-agent:v2.0.0
+~~~
+
+## Struktura repozitáře
+
+~~~text
+app/                  backend + web UI
+app/routes/           general, migration, capacity, provisioning
+app/static/           UI, migrace, DNS, users, i18n
+agent/                Capacity Agent
+install/              bootstrap/WireGuard pomocné skripty
+docs/                 deployment dokumentace
+.github/workflows/    CI a GHCR publish
+install.sh            první MGMT bootstrap
+docker-compose.yml    kontejnerové nasazení
+~~~
+
+## Release 2.0.0
+
+2.0.0 je první kompletní infrastrukturní release DSM. Podrobný popis architektury, nasazení, provozu a release notes je v [RELEASE-2.0.0.md](RELEASE-2.0.0.md).
 
 ## Licence
 
