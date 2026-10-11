@@ -411,23 +411,29 @@ async def proxy_route_adopt(stack_id: int, request: Request, session=Depends(req
     payload = await request.json()
     host = str(payload.get("host") or "").strip().lower().rstrip(".")
     detail = await build_detail(stack_id)
-    if any(str(r.get("host") or "").lower() == host for r in get_stack_proxy_routes(detail["stack"]["name"])):
-        raise HTTPException(409, "Doména už je v DSM správě.")
+    stack_name = detail["stack"]["name"]
+    existing = next((r for r in get_stack_proxy_routes(stack_name) if str(r.get("host") or "").lower() == host), None)
     try:
         service, container_port, legacy_port = _legacy_route_target(detail, host)
-        # Preserve the already-working published backend port during adoption.
-        # This avoids a needless redeploy/outage and lets DSM take ownership in-place.
-        backend_port = int(legacy_port or 0)
-        if not backend_port:
-            raise RuntimeError("Legacy směrování nemá platný backend port.")
-        save_stack_proxy_route(detail["stack"]["name"], host, service, container_port, backend_port, True)
+        # Adoption must switch to the same DSM-managed backend model used by
+        # newly created routes. Keeping a legacy LAN-bound port while marking
+        # the route managed makes sync_stack_proxy use host_ip and causes 502.
+        backend_port = _backend_port_for_stack(stack_name, service, container_port)
+        endpoint_id = int(detail["stack"]["endpoint_id"])
+        # Redeploy first and verify the new host_ip backend from PROXY. Until
+        # this succeeds the DB/Traefik still describe the working legacy route.
+        await _redeploy_stack_with_proxy_port(detail, endpoint_id, service, container_port, backend_port)
+        if existing:
+            save_stack_proxy_route(stack_name, host, service, container_port, backend_port, True, route_id=existing["id"])
+        else:
+            save_stack_proxy_route(stack_name, host, service, container_port, backend_port, True)
         refreshed = await build_detail(stack_id)
-        result = await sync_stack_proxy(refreshed, int(detail["stack"]["endpoint_id"]))
+        result = await sync_stack_proxy(refreshed, endpoint_id)
         return {"ok": True, "host": host, "service": service, "container_port": container_port,
-                "backend_port": backend_port, "proxy": result}
+                "backend_port": backend_port, "legacy_port": legacy_port, "proxy": result}
     except HTTPException: raise
     except Exception as exc:
-        raise HTTPException(502, "Převzetí legacy směrování selhalo: " + str(exc))
+        raise HTTPException(502, "Převzetí legacy směrování selhalo; původní Traefik routa nebyla přepnuta: " + str(exc))
 
 
 @app.post("/api/stacks/{stack_id}/proxy/routes")
