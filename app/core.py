@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 import re
 import httpx
 import asyncio
@@ -140,6 +140,21 @@ def init_db():
             updated_at TEXT NOT NULL
         )""")
         conn.execute("CREATE TABLE IF NOT EXISTS stack_proxy_settings (stack_name TEXT PRIMARY KEY, host TEXT NOT NULL, service TEXT, container_port INTEGER, backend_port INTEGER, https INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS stack_proxy_routes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stack_name TEXT NOT NULL,
+            host TEXT NOT NULL UNIQUE,
+            service TEXT NOT NULL,
+            container_port INTEGER NOT NULL,
+            backend_port INTEGER NOT NULL,
+            https INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_stack_proxy_routes_stack ON stack_proxy_routes(stack_name)")
+        # One-time compatibility migration: preserve every existing single-domain route.
+        conn.execute("""INSERT OR IGNORE INTO stack_proxy_routes(stack_name,host,service,container_port,backend_port,https,updated_at)
+            SELECT stack_name,host,COALESCE(service,''),COALESCE(container_port,0),COALESCE(backend_port,0),https,updated_at
+            FROM stack_proxy_settings WHERE host IS NOT NULL AND host != ''""")
         conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS app_users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, updated_at TEXT NOT NULL)")
         user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(app_users)").fetchall()}
@@ -191,10 +206,32 @@ def save_endpoint_setting(endpoint_id, migration_enabled, host_ip="", site="", p
         """, (int(endpoint_id), 1 if migration_enabled else 0, (host_ip or "").strip(), (site or "").strip(), (public_ip or "").strip(),
               (agent_url or "").strip().rstrip("/"), agent_token, (role or "NONE").upper(), (lan_ip or "").strip(), utcnow()))
 
-def get_stack_proxy_setting(stack_name):
+def get_stack_proxy_routes(stack_name):
     with db() as conn:
-        row = conn.execute("SELECT * FROM stack_proxy_settings WHERE stack_name = ?", (str(stack_name),)).fetchone()
-    return dict(row) if row else None
+        rows = conn.execute("SELECT * FROM stack_proxy_routes WHERE stack_name = ? ORDER BY id", (str(stack_name),)).fetchall()
+    return [dict(row) for row in rows]
+
+def get_stack_proxy_setting(stack_name):
+    # Compatibility helper for older call sites; new code must use all routes.
+    routes = get_stack_proxy_routes(stack_name)
+    return routes[0] if routes else None
+
+def save_stack_proxy_route(stack_name, host, service, container_port, backend_port, https=True, route_id=None):
+    host = str(host).strip().lower().rstrip(".")
+    with db() as conn:
+        if route_id:
+            conn.execute("""UPDATE stack_proxy_routes SET host=?,service=?,container_port=?,backend_port=?,https=?,updated_at=?
+                WHERE id=? AND stack_name=?""",
+                (host, str(service), int(container_port), int(backend_port), 1 if https else 0, utcnow(), int(route_id), str(stack_name)))
+        else:
+            conn.execute("""INSERT INTO stack_proxy_routes(stack_name,host,service,container_port,backend_port,https,updated_at)
+                VALUES(?,?,?,?,?,?,?)""",
+                (str(stack_name), host, str(service), int(container_port), int(backend_port), 1 if https else 0, utcnow()))
+    return host
+
+def delete_stack_proxy_route(stack_name, route_id):
+    with db() as conn:
+        conn.execute("DELETE FROM stack_proxy_routes WHERE id=? AND stack_name=?", (int(route_id), str(stack_name)))
 
 def save_stack_proxy_setting(stack_name, host, service="", container_port=None, backend_port=None, https=True):
     with db() as conn:
@@ -590,11 +627,12 @@ async def build_detail(stack_id):
             v = r.json(); volumes.append({"name": v.get("Name"), "driver": v.get("Driver"), "mountpoint": v.get("Mountpoint")})
         else: volumes.append({"name": volume_name, "driver": "unknown", "mountpoint": None})
     domains = []
-    managed_proxy = get_stack_proxy_setting(stack["Name"])
-    if managed_proxy:
-        domains.append({"host": managed_proxy.get("host"), "port": managed_proxy.get("backend_port"),
-                        "container_port": managed_proxy.get("container_port"), "service": managed_proxy.get("service"),
-                        "scheme": "http", "https": bool(managed_proxy.get("https")), "managed": True})
+    managed_routes = get_stack_proxy_routes(stack["Name"])
+    if managed_routes:
+        for route in managed_routes:
+            domains.append({"id": route.get("id"), "host": route.get("host"), "port": route.get("backend_port"),
+                            "container_port": route.get("container_port"), "service": route.get("service"),
+                            "scheme": "http", "https": bool(route.get("https")), "managed": True})
     else:
         for container in containers:
             labels = container["labels"]
