@@ -267,9 +267,10 @@ def _detect_container_port(container):
     return None
 
 
-def _backend_port_for_stack(stack_name):
-    # Stable, deterministic high port. Collisions are checked before deployment.
-    digest = int(hashlib.sha256(str(stack_name).encode("utf-8")).hexdigest()[:8], 16)
+def _backend_port_for_stack(stack_name, service="", container_port=0):
+    # Stable per route target: multiple domains sharing service:port reuse one backend.
+    key = str(stack_name) + "|" + str(service) + "|" + str(container_port)
+    digest = int(hashlib.sha256(key.encode("utf-8")).hexdigest()[:8], 16)
     return 20000 + (digest % 20000)
 
 
@@ -356,37 +357,82 @@ async def _redeploy_stack_with_proxy_port(detail, endpoint_id, service, containe
     raise RuntimeError("Backend po redeployi neposlouchá na " + host_ip + ":" + str(backend_port))
 
 
-@app.put("/api/stacks/{stack_id}/proxy")
-async def proxy_configure(stack_id: int, request: Request, session=Depends(require_csrf)):
+@app.get("/api/stacks/{stack_id}/proxy/candidates")
+async def proxy_candidates(stack_id: int, session=Depends(require_permission("dashboard_read"))):
+    detail = await build_detail(stack_id)
+    candidates = []
+    seen = set()
+    for container in detail.get("containers") or []:
+        service = _container_service_name(container)
+        for p in container.get("ports") or []:
+            port = int(p.get("private") or 0)
+            if service and port and (p.get("type") or "tcp") == "tcp" and (service, port) not in seen:
+                seen.add((service, port))
+                candidates.append({"service": service, "container_port": port, "container": container.get("name")})
+    return {"routes": detail.get("domains") or [], "candidates": candidates}
+
+
+@app.post("/api/stacks/{stack_id}/proxy/routes")
+async def proxy_route_create(stack_id: int, request: Request, session=Depends(require_csrf)):
     if "migrations" not in user_permissions(session.get("user", "")) and "admin" not in user_permissions(session.get("user", "")):
         raise HTTPException(403, "Permission denied")
     payload = await request.json()
     host = str(payload.get("host") or "").strip().lower().rstrip(".")
+    service = str(payload.get("service") or "").strip()
+    try: container_port = int(payload.get("container_port") or 0)
+    except Exception: container_port = 0
     if not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host:
-        raise HTTPException(400, "Zadej platnou doménu, např. test01.lukas.cloud")
+        raise HTTPException(400, "Zadej platnou doménu.")
     detail = await build_detail(stack_id)
+    if not service or not (1 <= container_port <= 65535):
+        try: service, container_port = await _choose_proxy_service(detail)
+        except Exception as exc: raise HTTPException(400, str(exc))
+    valid = any(_container_service_name(c) == service and any(int(p.get("private") or 0) == container_port for p in (c.get("ports") or [])) for c in detail.get("containers") or [])
+    if not valid:
+        raise HTTPException(400, "Služba " + service + ":" + str(container_port) + " nebyla ve stacku nalezena.")
+    backend_port = _backend_port_for_stack(detail["stack"]["name"], service, container_port)
     endpoint_id = int(detail["stack"]["endpoint_id"])
-    service, container_port = await _choose_proxy_service(detail)
-    backend_port = _backend_port_for_stack(detail["stack"]["name"])
-    # Refuse a deterministic port collision with another container.
     containers = (await docker_get(endpoint_id, "/containers/json", params={"all":"1"})).json()
     for container in containers:
-        if (container.get("Labels") or {}).get("com.docker.compose.project") == detail["stack"]["name"]:
-            continue
-        for p in container.get("Ports") or []:
-            if int(p.get("PublicPort") or 0) == backend_port:
-                raise HTTPException(409, "Automatický backend port " + str(backend_port) + " už používá jiný kontejner.")
+        if (container.get("Labels") or {}).get("com.docker.compose.project") == detail["stack"]["name"]: continue
+        if any(int(p.get("PublicPort") or 0) == backend_port for p in (container.get("Ports") or [])):
+            raise HTTPException(409, "Backend port " + str(backend_port) + " už používá jiný kontejner.")
     try:
         await _redeploy_stack_with_proxy_port(detail, endpoint_id, service, container_port, backend_port)
-        save_stack_proxy_setting(detail["stack"]["name"], host, service, container_port, backend_port, True)
+        try:
+            save_stack_proxy_route(detail["stack"]["name"], host, service, container_port, backend_port, True)
+        except Exception as exc:
+            if "UNIQUE" in str(exc).upper(): raise HTTPException(409, "Doména už je přiřazena jinému směrování.")
+            raise
         refreshed = await build_detail(stack_id)
         result = await sync_stack_proxy(refreshed, endpoint_id)
-        return {"ok": True, "host": host, "https": True, "service": service, "container_port": container_port,
-                "backend_port": backend_port, "proxy": result}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(502, "Nastavení domény selhalo: " + str(exc))
+        return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": result}
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(502, "Přidání směrování selhalo: " + str(exc))
+
+
+@app.delete("/api/stacks/{stack_id}/proxy/routes/{route_id}")
+async def proxy_route_delete(stack_id: int, route_id: int, session=Depends(require_csrf)):
+    if "migrations" not in user_permissions(session.get("user", "")) and "admin" not in user_permissions(session.get("user", "")):
+        raise HTTPException(403, "Permission denied")
+    detail = await build_detail(stack_id)
+    routes = get_stack_proxy_routes(detail["stack"]["name"])
+    if not any(int(r["id"]) == int(route_id) for r in routes): raise HTTPException(404, "Směrování nenalezeno.")
+    delete_stack_proxy_route(detail["stack"]["name"], route_id)
+    refreshed = await build_detail(stack_id)
+    if refreshed.get("domains"):
+        result = await sync_stack_proxy(refreshed, int(detail["stack"]["endpoint_id"]))
+    else:
+        site = get_endpoint_settings().get(int(detail["stack"]["endpoint_id"]), {}).get("site")
+        await remove_stack_proxy(detail["stack"]["name"], site)
+        result = {"configured": False}
+    return {"ok": True, "proxy": result}
+
+
+@app.put("/api/stacks/{stack_id}/proxy")
+async def proxy_configure(stack_id: int, request: Request, session=Depends(require_csrf)):
+    # Backward-compatible endpoint: now appends a route instead of replacing the stack domain.
+    return await proxy_route_create(stack_id, request, session)
 
 @app.post("/api/stacks/{stack_id}/proxy/sync")
 async def proxy_sync(stack_id: int, session=Depends(require_csrf)):
