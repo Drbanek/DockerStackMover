@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 import re
 import httpx
 import asyncio
@@ -637,7 +637,9 @@ async def build_detail(stack_id):
         for container in containers:
             labels = container["labels"]
             if labels.get("dc1.proxy.enable") == "true":
-                domains.append({"host": labels.get("dc1.proxy.host"), "port": labels.get("dc1.proxy.port"), "scheme": labels.get("dc1.proxy.scheme", "http")})
+                domains.append({"host": labels.get("dc1.proxy.host"), "port": labels.get("dc1.proxy.port"), "scheme": labels.get("dc1.proxy.scheme", "http"),
+                                "managed": False, "legacy": True, "container": container.get("name"),
+                                "service": labels.get("com.docker.compose.service")})
     endpoint_name = endpoint["Name"] if endpoint else "Endpoint " + str(endpoint_id)
     return {"stack": {"id": stack["Id"], "name": stack["Name"], "endpoint_id": endpoint_id, "endpoint": endpoint_name, "status": stack["Status"]}, "containers": containers, "volumes": volumes, "domains": domains}
 
