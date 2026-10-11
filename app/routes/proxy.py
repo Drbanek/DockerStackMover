@@ -372,6 +372,64 @@ async def proxy_candidates(stack_id: int, session=Depends(require_permission("da
     return {"routes": detail.get("domains") or [], "candidates": candidates}
 
 
+def _legacy_route_target(detail, host):
+    host = str(host or "").strip().lower().rstrip(".")
+    matches = []
+    for container in detail.get("containers") or []:
+        labels = container.get("labels") or {}
+        if labels.get("dc1.proxy.enable") != "true": continue
+        if str(labels.get("dc1.proxy.host") or "").strip().lower().rstrip(".") != host: continue
+        service = _container_service_name(container)
+        try: legacy_port = int(labels.get("dc1.proxy.port") or 0)
+        except Exception: legacy_port = 0
+        # Legacy dc1.proxy.port is normally the published host port. Resolve it
+        # back to the container's private port; fall back to direct private-port use.
+        candidates = []
+        for p in container.get("ports") or []:
+            if (p.get("type") or "tcp") != "tcp": continue
+            private = int(p.get("private") or 0)
+            public = int(p.get("public") or 0)
+            if legacy_port and (public == legacy_port or private == legacy_port):
+                candidates.append(private)
+        if not candidates:
+            detected = _detect_container_port(container)
+            if detected: candidates.append(detected)
+        for private in sorted(set(candidates)):
+            if service and private: matches.append((service, private, legacy_port))
+    unique = []
+    for item in matches:
+        if item not in unique: unique.append(item)
+    if len(unique) != 1:
+        raise RuntimeError("DSM nedokázal jednoznačně určit službu pro legacy doménu " + host + ".")
+    return unique[0]
+
+
+@app.post("/api/stacks/{stack_id}/proxy/adopt")
+async def proxy_route_adopt(stack_id: int, request: Request, session=Depends(require_csrf)):
+    if "migrations" not in user_permissions(session.get("user", "")) and "admin" not in user_permissions(session.get("user", "")):
+        raise HTTPException(403, "Permission denied")
+    payload = await request.json()
+    host = str(payload.get("host") or "").strip().lower().rstrip(".")
+    detail = await build_detail(stack_id)
+    if any(str(r.get("host") or "").lower() == host for r in get_stack_proxy_routes(detail["stack"]["name"])):
+        raise HTTPException(409, "Doména už je v DSM správě.")
+    try:
+        service, container_port, legacy_port = _legacy_route_target(detail, host)
+        # Preserve the already-working published backend port during adoption.
+        # This avoids a needless redeploy/outage and lets DSM take ownership in-place.
+        backend_port = int(legacy_port or 0)
+        if not backend_port:
+            raise RuntimeError("Legacy směrování nemá platný backend port.")
+        save_stack_proxy_route(detail["stack"]["name"], host, service, container_port, backend_port, True)
+        refreshed = await build_detail(stack_id)
+        result = await sync_stack_proxy(refreshed, int(detail["stack"]["endpoint_id"]))
+        return {"ok": True, "host": host, "service": service, "container_port": container_port,
+                "backend_port": backend_port, "proxy": result}
+    except HTTPException: raise
+    except Exception as exc:
+        raise HTTPException(502, "Převzetí legacy směrování selhalo: " + str(exc))
+
+
 @app.post("/api/stacks/{stack_id}/proxy/routes")
 async def proxy_route_create(stack_id: int, request: Request, session=Depends(require_csrf)):
     if "migrations" not in user_permissions(session.get("user", "")) and "admin" not in user_permissions(session.get("user", "")):
