@@ -39,7 +39,7 @@ async def migration_worker(job):
         stack_file, source_host_ip, target_host_ip, rewritten_ports = rewrite_host_bind_ip(stack_file, source_endpoint, target)
         source_mgmt = (get_endpoint_settings().get(int(source_id), {}).get("host_ip") or "").strip()
         target_mgmt = (get_endpoint_settings().get(int(target_id), {}).get("host_ip") or "").strip()
-        managed_proxy = get_stack_proxy_setting(detail["stack"]["name"])
+        managed_routes = get_stack_proxy_routes(detail["stack"]["name"])
         if source_mgmt and target_mgmt and source_mgmt != target_mgmt:
             # Rewrite source WireGuard host binds structurally in Compose.
             # Handle both short syntax (IP:HOST:CONTAINER) and long syntax
@@ -64,21 +64,25 @@ async def migration_worker(job):
                 if ports:
                     svc["ports"] = changed_ports
             stack_file = yaml.safe_dump(compose_data, sort_keys=False, allow_unicode=True)
-            if managed_proxy:
+            if managed_routes:
                 from .proxy import _inject_backend_publish
-                service = str(managed_proxy.get("service") or "")
-                container_port = int(managed_proxy.get("container_port") or 0)
-                backend_port = int(managed_proxy.get("backend_port") or 0)
-                if not service or not container_port or not backend_port:
-                    raise RuntimeError("Managed proxy metadata nejsou kompletní; migrace byla zastavena před vypnutím zdroje.")
-                # Always canonicalize the managed publish. A stale source bind
-                # must be removed even when an earlier textual rewrite matched
-                # some other occurrence of the source management IP.
-                stack_file = _inject_backend_publish(
-                    stack_file, service, target_mgmt, backend_port, container_port,
-                    replace_managed=True,
-                )
-                rewritten_ports += 1
+                # Canonicalize every unique service/port backend used by the stack.
+                # Multiple domains can intentionally share the same backend.
+                seen_backends = set()
+                for managed_proxy in managed_routes:
+                    service = str(managed_proxy.get("service") or "")
+                    container_port = int(managed_proxy.get("container_port") or 0)
+                    backend_port = int(managed_proxy.get("backend_port") or 0)
+                    if not service or not container_port or not backend_port:
+                        raise RuntimeError("Managed proxy metadata nejsou kompletní; migrace byla zastavena před vypnutím zdroje.")
+                    key = (service, container_port, backend_port)
+                    if key in seen_backends: continue
+                    seen_backends.add(key)
+                    stack_file = _inject_backend_publish(
+                        stack_file, service, target_mgmt, backend_port, container_port,
+                        replace_managed=True,
+                    )
+                    rewritten_ports += 1
         env = source_stack.get("Env") or []
         collision_message = "Cíl je volný"
         if rewritten_ports: collision_message += " · host bind IP: " + source_host_ip + " → " + target_host_ip + " (" + str(rewritten_ports) + "×)"
