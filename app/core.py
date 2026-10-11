@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.3"
 import re
 import httpx
 import asyncio
@@ -151,6 +151,22 @@ def init_db():
             updated_at TEXT NOT NULL
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_stack_proxy_routes_stack ON stack_proxy_routes(stack_name)")
+        # v2.2.3: old schema made host globally UNIQUE. Rebuild it so uniqueness
+        # belongs to a stack and stale rows from renamed/recreated stacks cannot block adoption.
+        route_sql = (conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='stack_proxy_routes'").fetchone() or [""])[0] or ""
+        if "host TEXT NOT NULL UNIQUE" in route_sql:
+            conn.execute("""CREATE TABLE stack_proxy_routes_v223 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, stack_name TEXT NOT NULL, host TEXT NOT NULL,
+                service TEXT NOT NULL, container_port INTEGER NOT NULL, backend_port INTEGER NOT NULL,
+                https INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL,
+                UNIQUE(stack_name, host)
+            )""")
+            conn.execute("""INSERT OR IGNORE INTO stack_proxy_routes_v223
+                (id,stack_name,host,service,container_port,backend_port,https,updated_at)
+                SELECT id,stack_name,host,service,container_port,backend_port,https,updated_at FROM stack_proxy_routes""")
+            conn.execute("DROP TABLE stack_proxy_routes")
+            conn.execute("ALTER TABLE stack_proxy_routes_v223 RENAME TO stack_proxy_routes")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_stack_proxy_routes_stack ON stack_proxy_routes(stack_name)")
         # One-time compatibility migration: preserve every existing single-domain route.
         conn.execute("""INSERT OR IGNORE INTO stack_proxy_routes(stack_name,host,service,container_port,backend_port,https,updated_at)
             SELECT stack_name,host,COALESCE(service,''),COALESCE(container_port,0),COALESCE(backend_port,0),https,updated_at
