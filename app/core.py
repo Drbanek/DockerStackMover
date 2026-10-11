@@ -627,11 +627,12 @@ async def build_detail(stack_id):
             v = r.json(); volumes.append({"name": v.get("Name"), "driver": v.get("Driver"), "mountpoint": v.get("Mountpoint")})
         else: volumes.append({"name": volume_name, "driver": "unknown", "mountpoint": None})
     domains = []
-    managed_proxy = get_stack_proxy_setting(stack["Name"])
-    if managed_proxy:
-        domains.append({"host": managed_proxy.get("host"), "port": managed_proxy.get("backend_port"),
-                        "container_port": managed_proxy.get("container_port"), "service": managed_proxy.get("service"),
-                        "scheme": "http", "https": bool(managed_proxy.get("https")), "managed": True})
+    managed_routes = get_stack_proxy_routes(stack["Name"])
+    if managed_routes:
+        for route in managed_routes:
+            domains.append({"id": route.get("id"), "host": route.get("host"), "port": route.get("backend_port"),
+                            "container_port": route.get("container_port"), "service": route.get("service"),
+                            "scheme": "http", "https": bool(route.get("https")), "managed": True})
     else:
         for container in containers:
             labels = container["labels"]
