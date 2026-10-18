@@ -5,3 +5,10 @@ function dnsForm(record){document.getElementById("dnsRecordId").value=record?rec
 function editDnsRecord(r){dnsForm(r)} function newDnsRecord(){dnsForm(null)} function closeDnsEditor(){document.getElementById("dnsEditor").style.display="none"}
 async function saveDnsRecord(){const id=document.getElementById("dnsRecordId").value;const payload={name:document.getElementById("dnsName").value.trim(),type:document.getElementById("dnsType").value,content:document.getElementById("dnsContent").value.trim(),ttl:Number(document.getElementById("dnsTtl").value)||60};const p=document.getElementById("dnsPriority").value;if(p!=="")payload.priority=Number(p);const url="/api/dns/domains/"+encodeURIComponent(dnsZone)+"/records"+(id?"/"+encodeURIComponent(id):"");const r=await fetch(url,{method:id?"PUT":"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(payload)});if(!r.ok){alert("DNS změna selhala: "+await r.text());return}closeDnsEditor();await loadDnsRecords()}
 async function deleteDnsRecord(r){if(!confirm("Smazat DNS záznam "+r.name+" "+r.type+"?"))return;const res=await fetch("/api/dns/domains/"+encodeURIComponent(dnsZone)+"/records/"+encodeURIComponent(r.id),{method:"DELETE",headers:{"X-CSRF-Token":csrfToken}});if(!res.ok){alert("Smazání selhalo: "+await res.text());return}await loadDnsRecords()}
+
+async function syncManagedDns(){
+ const state=document.getElementById("dnsSyncState");state.textContent="Synchronizuji existující DSM routy s DNS…";
+ try{const r=await fetch("/api/dns/sync-routes",{method:"POST",headers:{"X-CSRF-Token":csrfToken}});const raw=await r.text();let d={};try{d=JSON.parse(raw)}catch(_){}
+ if(!r.ok)throw new Error(d.detail||raw);const ok=(d.results||[]).filter(x=>x.ok).length,fail=(d.results||[]).length-ok;
+ state.textContent="✓ DNS sync: "+ok+" rout OK"+(fail?" · "+fail+" vyžaduje kontrolu":"");await loadDnsRecords()}catch(e){state.textContent="✕ "+String(e.message||e)}
+}
