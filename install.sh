@@ -90,7 +90,25 @@ cat >/opt/dockerstackmover-host-tools/update-dsm <<'DSMUPDATE'
 set -Eeuo pipefail
 cd /opt/dockerstackmover
 docker compose pull dockerstackmover
-docker compose up -d --no-deps dockerstackmover
+NEW_IMAGE=$(docker image inspect ghcr.io/drbanek/dockerstackmover:latest --format '{{.Id}}')
+docker compose up -d --no-deps --force-recreate dockerstackmover
+CID=$(docker compose ps -q dockerstackmover)
+[[ -n "$CID" ]] || { echo "DSM container was not created" >&2; exit 1; }
+RUNNING_IMAGE=$(docker inspect "$CID" --format '{{.Image}}')
+[[ "$RUNNING_IMAGE" == "$NEW_IMAGE" ]] || { echo "DSM is still running old image: $RUNNING_IMAGE expected $NEW_IMAGE" >&2; exit 1; }
+BIND_IP=$(awk -F= '$1=="MOVER_BIND_IP"{print $2}' .env)
+PORT=$(awk -F= '$1=="MOVER_PORT"{print $2}' .env)
+for _ in $(seq 1 30); do
+  STATUS=$(curl -fsS "http://$BIND_IP:$PORT/api/setup/status" 2>/dev/null || true)
+  if [[ -n "$STATUS" ]]; then
+    echo "DSM updated successfully: $STATUS"
+    exit 0
+  fi
+  sleep 2
+done
+echo "DSM container restarted but health/version endpoint did not become ready" >&2
+docker compose logs --tail=80 dockerstackmover >&2
+exit 1
 DSMUPDATE
 chmod 0755 /opt/dockerstackmover-host-tools/update-dsm
 
