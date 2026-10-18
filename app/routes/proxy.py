@@ -508,10 +508,13 @@ async def proxy_route_create(stack_id: int, request: Request, session=Depends(re
         refreshed = await build_detail(stack_id)
         result = await sync_stack_proxy(refreshed, endpoint_id)
         created_route = next((r for r in get_stack_proxy_routes(detail["stack"]["name"]) if r["host"] == host), None)
-        dns = {"managed": False, "status": "disabled"}
-        if created_route and vas_hosting_enabled():
+        dns = {"managed": False, "status": "not-configured"}
+        if created_route:
             site = (get_endpoint_settings().get(endpoint_id, {}).get("site") or "").strip().upper()
-            dns = await ensure_route_dns(detail["stack"]["name"], created_route["id"], host, site)
+            try:
+                dns = await ensure_route_dns(detail["stack"]["name"], created_route["id"], host, site)
+            except Exception as exc:
+                dns = {"managed": False, "status": "error", "error": str(exc)}
         return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": result, "dns": dns}
     except HTTPException: raise
     except Exception as exc: raise HTTPException(502, "Přidání směrování selhalo: " + str(exc))
