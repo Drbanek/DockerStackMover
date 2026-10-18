@@ -788,7 +788,7 @@ async def ensure_route_dns(stack_name, route_id, host, site):
     if not public_ip:
         raise RuntimeError("Lokalita " + site + " nemá veřejnou IP pro automatické DNS.")
     zone, records = await vas_find_zone(host)
-    anchor = "proxy-" + _safe_name(site) + "." + zone
+    anchor = "proxy-" + (re.sub(r"[^a-z0-9-]+", "-", site.lower()).strip("-")[:40] or "site") + "." + zone
     anchor_matches = [r for r in records if _dns_record_fqdn(r, zone) == anchor]
     if anchor_matches:
         good = [r for r in anchor_matches if str(r.get("type") or "").upper() == "A" and str(r.get("content") or "").strip() == public_ip]
