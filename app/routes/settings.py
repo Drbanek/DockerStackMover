@@ -139,6 +139,25 @@ async def update_dsm(session=Depends(require_csrf)):
             "current_version": APP_VERSION, "target_version": latest_version if 'latest_version' in locals() else ""}
 
 
+
+def dns_record_fqdn(record, zone):
+    name = str(record.get("name") or "").strip().rstrip(".").lower()
+    zone = str(zone or "").strip().rstrip(".").lower()
+    if not name or name == "@" or name == zone: return zone
+    return name if name.endswith("." + zone) else name + "." + zone
+
+async def _vas_find_zone(host):
+    from .dns import vas_find_zone
+    return await vas_find_zone(host)
+
+async def _vas_create_record(zone, host, record_type, content, ttl=60):
+    from .dns import vas_create_record
+    return await vas_create_record(zone, host, record_type, content, ttl)
+
+def remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose):
+    from .dns import _remember_managed_dns
+    return _remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose)
+
 @app.get("/api/system/public-access")
 async def system_public_access_status(session=Depends(require_permission("admin"))):
     return {"enabled": setting_get("dsm_public_enabled", "0") == "1",
@@ -330,16 +349,16 @@ async def system_public_access_enable(request: Request, session=Depends(require_
         "  services:", "    dsm-system:", "      loadBalancer:", "        servers:",
         "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]) + "\n"
     await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", config)
-    zone, records = await vas_find_zone(host)
-    cname = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
-    conflicts = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
+    zone, records = await _vas_find_zone(host)
+    cname = [r for r in records if dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
+    conflicts = [r for r in records if dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
     if conflicts: raise HTTPException(409, host + " už má jiný DNS záznam; DSM ho nepřepíše.")
     if cname:
         values = {str(r.get("content") or "").rstrip(".").lower() for r in cname}
         if values != {anchor}: raise HTTPException(409, host + " CNAME existuje s jinou hodnotou; DSM ho nepřepíše.")
         record = cname[0]
     else:
-        record = await vas_create_record(zone, host, "CNAME", anchor, 60)
-    _remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
+        record = await _vas_create_record(zone, host, "CNAME", anchor, 60)
+    remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
     setting_set("dsm_public_enabled", "1"); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
     return {"ok": True, "hostname": host, "target": anchor, "backend": backend_ip + ":" + str(port)}
