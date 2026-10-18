@@ -47,3 +47,26 @@ async def dns_delete(zone: str, record_id: str, session=Depends(require_csrf)):
     if "dns_write" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     await _vas_request("DELETE", "/domains/" + zone + "/dns-records/" + record_id)
     return {"ok": True, "records": await vas_dns_records(zone)}
+
+
+@app.post("/api/dns/sync-routes")
+async def dns_sync_routes(session=Depends(require_csrf)):
+    if "dns_write" not in user_permissions(session.get("user","")) and "admin" not in user_permissions(session.get("user","")):
+        raise HTTPException(403, "Permission denied")
+    if not vas_hosting_enabled():
+        raise HTTPException(409, "Nejdřív nastav Váš Hosting API.")
+    from .general import build_detail
+    stacks = await get_stacks()
+    settings = get_endpoint_settings()
+    results = []
+    for stack in stacks:
+        detail = await build_detail(int(stack["Id"]))
+        endpoint_id = int(detail["stack"]["endpoint_id"])
+        site = (settings.get(endpoint_id, {}).get("site") or "").strip().upper()
+        for route in get_stack_proxy_routes(detail["stack"]["name"]):
+            try:
+                dns = await ensure_route_dns(detail["stack"]["name"], route["id"], route["host"], site)
+                results.append({"stack": detail["stack"]["name"], "host": route["host"], "ok": True, "dns": dns})
+            except Exception as exc:
+                results.append({"stack": detail["stack"]["name"], "host": route["host"], "ok": False, "error": str(exc)})
+    return {"ok": all(x["ok"] for x in results), "results": results}
