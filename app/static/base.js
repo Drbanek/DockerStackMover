@@ -1,5 +1,5 @@
 let currentUser="";let currentPermissions=[];
-function showSettingsTab(name,button){document.querySelectorAll(".settingsPage").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".settingsTab").forEach(x=>x.classList.remove("active"));const page=document.getElementById("settings-"+name);if(page)page.classList.add("active");if(button)button.classList.add("active")}
+function showSettingsTab(name,button){if(name==="system")loadDsmPublicAccess();document.querySelectorAll(".settingsPage").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".settingsTab").forEach(x=>x.classList.remove("active"));const page=document.getElementById("settings-"+name);if(page)page.classList.add("active");if(button)button.classList.add("active")}
 function showTab(name,button){document.querySelectorAll(".tabpage").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));const page=document.getElementById("tab-"+name);if(page)page.classList.add("active");if(button)button.classList.add("active")}
 let csrfToken = "";
 function bindEnterActions(){
