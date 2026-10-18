@@ -154,6 +154,14 @@ async def firewall_rollback(endpoint_id:int,txid:str,session=Depends(require_csr
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     return await agent_firewall(endpoint_id,"POST",suffix="/rollback/"+txid)
 
+
+def dns_record_fqdn(record, zone):
+    name = str(record.get("name") or "").strip().rstrip(".").lower()
+    zone = str(zone or "").strip().rstrip(".").lower()
+    if not name or name == "@" or name == zone:
+        return zone
+    return name if name.endswith("." + zone) else name + "." + zone
+
 async def proxy_public_readiness(endpoint_id, settings):
     site_name = str(settings.get("site") or "").strip().upper()
     site = get_site(site_name) or {}
@@ -203,7 +211,7 @@ async def proxy_public_readiness(endpoint_id, settings):
     else:
         try:
             zone, records = await vas_find_zone(anchor)
-            matches = [r for r in records if _dns_record_fqdn(r, zone) == anchor and str(r.get("type") or "").upper() == "A"]
+            matches = [r for r in records if dns_record_fqdn(r, zone) == anchor and str(r.get("type") or "").upper() == "A"]
             values = sorted({str(r.get("content") or "").strip() for r in matches})
             dns = {"ok": values == [detected], "message": anchor + " → " + (", ".join(values) if values else "missing") + " · expected " + detected}
         except Exception as exc:
