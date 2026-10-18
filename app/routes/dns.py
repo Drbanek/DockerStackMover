@@ -70,3 +70,52 @@ async def dns_sync_routes(session=Depends(require_csrf)):
             except Exception as exc:
                 results.append({"stack": detail["stack"]["name"], "host": route["host"], "ok": False, "error": str(exc)})
     return {"ok": all(x["ok"] for x in results), "results": results}
+
+
+@app.get("/api/dns/managed")
+async def dns_managed_inventory(session=Depends(require_permission("dns_read"))):
+    """DSM-owned DNS inventory with live provider verification."""
+    items = []
+    with db() as conn:
+        owned = [dict(r) for r in conn.execute("SELECT * FROM managed_dns_records ORDER BY purpose, host").fetchall()]
+    seen = set()
+    for row in owned:
+        key = (str(row.get("zone") or ""), str(row.get("provider_record_id") or ""))
+        seen.add(key)
+        status, actual = "unknown", ""
+        try:
+            records = await vas_dns_records(row["zone"])
+            match = next((r for r in records if str(r.get("id")) == str(row["provider_record_id"])), None)
+            if not match:
+                status = "missing"
+            else:
+                actual = str(match.get("content") or "").rstrip(".")
+                status = "ok" if actual.lower() == str(row["expected_content"] or "").rstrip(".").lower() else "drift"
+        except Exception as exc:
+            status = "error"
+            actual = str(exc)
+        items.append({**row, "source": "managed", "status": status, "actual_content": actual})
+    # Site proxy anchors are infrastructure records and pre-date route ownership.
+    # Show them even when they are not yet present in managed_dns_records.
+    for site in get_sites():
+        host = str(site.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
+        expected = str(site.get("public_ip") or "").strip()
+        if not host:
+            continue
+        status, actual, zone, record_id = "missing", "", "", ""
+        try:
+            zone, records = await vas_find_zone(host)
+            matches = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "A"]
+            if matches:
+                record_id = str(matches[0].get("id") or "")
+                actual = str(matches[0].get("content") or "").strip()
+                status = "ok" if expected and actual == expected else "drift"
+        except Exception as exc:
+            status, actual = "error", str(exc)
+        if (zone, record_id) in seen and record_id:
+            continue
+        items.append({"id": None, "stack_name": "", "route_id": None, "host": host, "zone": zone,
+                      "provider_record_id": record_id, "record_type": "A", "expected_content": expected,
+                      "purpose": "site-anchor", "created_at": "", "source": "site",
+                      "site": site.get("name"), "status": status, "actual_content": actual})
+    return {"items": items}
