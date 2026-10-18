@@ -134,3 +134,50 @@ async def update_dsm(session=Depends(require_csrf)):
         raise HTTPException(500, "Nelze předat požadavek hostu: " + str(exc))
     return {"ok": True, "message": "Aktualizace byla předána hostu. DSM se během aktualizace restartuje.",
             "current_version": APP_VERSION, "target_version": latest_version if 'latest_version' in locals() else ""}
+
+
+@app.get("/api/system/public-access")
+async def system_public_access_status(session=Depends(require_permission("admin"))):
+    return {"enabled": setting_get("dsm_public_enabled", "0") == "1",
+            "hostname": setting_get("dsm_public_hostname", "dsm.lukas.cloud"),
+            "backend_ip": setting_get("wg_hub_lan_ip", ""),
+            "backend_port": int(setting_get("dsm_public_backend_port", "8082") or 8082)}
+
+@app.post("/api/system/public-access")
+async def system_public_access_enable(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403, "Permission denied")
+    p = await request.json()
+    host = str(p.get("hostname") or "dsm.lukas.cloud").strip().lower().rstrip(".")
+    port = int(p.get("backend_port") or 8082)
+    if not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host: raise HTTPException(400, "Neplatný DSM hostname.")
+    if not (1 <= port <= 65535): raise HTTPException(400, "Neplatný backend port.")
+    backend_ip = str(setting_get("wg_hub_lan_ip", "") or "").strip()
+    if not backend_ip: raise HTTPException(409, "CONTROL/MGMT LAN IP není známá.")
+    main = next((x for x in get_sites() if int(x.get("management_octet") or 0) == 1), None)
+    if not main: raise HTTPException(409, "MAIN lokalita nebyla nalezena.")
+    anchor = str(main.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
+    if not anchor: raise HTTPException(409, "MAIN lokalita nemá Proxy DNS hostname.")
+    from .proxy import _site_proxy, _run_proxy_helper, _write_dynamic_file
+    proxy_id = _site_proxy(main["name"])
+    await _run_proxy_helper(proxy_id, "nc -z -w 5 " + backend_ip + " " + str(port), host_network=True)
+    rule = "Host(" + chr(96) + host + chr(96) + ")"
+    config = "\n".join(["http:", "  routers:", "    dsm-system-web:", "      rule: " + json.dumps(rule),
+        "      entryPoints: [web]", "      service: dsm-system", "    dsm-system-secure:",
+        "      rule: " + json.dumps(rule), "      entryPoints: [websecure]", "      service: dsm-system",
+        "      tls:", "        certResolver: " + setting_get("traefik_cert_resolver", "letsencrypt"),
+        "  services:", "    dsm-system:", "      loadBalancer:", "        servers:",
+        "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]) + "\n"
+    await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", config)
+    zone, records = await vas_find_zone(host)
+    cname = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
+    conflicts = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
+    if conflicts: raise HTTPException(409, host + " už má jiný DNS záznam; DSM ho nepřepíše.")
+    if cname:
+        values = {str(r.get("content") or "").rstrip(".").lower() for r in cname}
+        if values != {anchor}: raise HTTPException(409, host + " CNAME existuje s jinou hodnotou; DSM ho nepřepíše.")
+        record = cname[0]
+    else:
+        record = await vas_create_record(zone, host, "CNAME", anchor, 60)
+    _remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
+    setting_set("dsm_public_enabled", "1"); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
+    return {"ok": True, "hostname": host, "target": anchor, "backend": backend_ip + ":" + str(port)}
