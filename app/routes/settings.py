@@ -139,6 +139,13 @@ async def update_dsm(session=Depends(require_csrf)):
             "current_version": APP_VERSION, "target_version": latest_version if 'latest_version' in locals() else ""}
 
 
+def _public_dns_record_fqdn(record, zone):
+    name = str(record.get("name") or "").strip().rstrip(".").lower()
+    zone = str(zone or "").strip().rstrip(".").lower()
+    if not name or name == "@" or name == zone:
+        return zone
+    return name if name.endswith("." + zone) else name + "." + zone
+
 @app.get("/api/system/public-access")
 async def system_public_access_status(session=Depends(require_permission("admin"))):
     return {"enabled": setting_get("dsm_public_enabled", "0") == "1",
@@ -183,8 +190,8 @@ async def system_public_access_enable(request: Request, session=Depends(require_
         "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]) + "\n"
     await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", config)
     zone, records = await vas_find_zone(host)
-    cname = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
-    conflicts = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
+    cname = [r for r in records if _public_dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
+    conflicts = [r for r in records if _public_dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
     if conflicts: raise HTTPException(409, host + " už má jiný DNS záznam; DSM ho nepřepíše.")
     if cname:
         values = {str(r.get("content") or "").rstrip(".").lower() for r in cname}
