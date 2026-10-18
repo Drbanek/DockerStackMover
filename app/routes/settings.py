@@ -79,6 +79,50 @@ async def app_settings_save(request: Request, session=Depends(require_csrf)):
         firewall_applied = await _apply_management_access_policy()
     return {"ok": True, "restart_required": False, "management_firewall_applied": firewall_applied}
 
+@app.get("/api/system/management-access-rules")
+async def management_access_rules(session=Depends(require_permission("admin"))):
+    raw = setting_get("management_access_rules", "")
+    rules = []
+    if raw:
+        try:
+            rules = json.loads(raw)
+        except Exception:
+            rules = []
+    if not rules:
+        rules = [{"cidr": x.strip(), "enabled": True} for x in setting_get("management_access_sources", "").splitlines() if x.strip()]
+    return {"mode": setting_get("management_access_mode", "ip"), "rules": rules}
+
+@app.put("/api/system/management-access-rules")
+async def management_access_rules_save(request: Request, session=Depends(require_csrf)):
+    if "admin" not in user_permissions(session.get("user","")):
+        raise HTTPException(403, "Permission denied")
+    p = await request.json()
+    mode = str(p.get("mode") or "ip").strip().lower()
+    if mode not in ("ip", "any"):
+        raise HTTPException(400, "Podporovaný režim je IP / CIDR nebo neomezený přístup.")
+    clean = []
+    seen = set()
+    for item in p.get("rules") or []:
+        cidr = str(item.get("cidr") or "").strip()
+        if not cidr:
+            continue
+        try:
+            cidr = str(ipaddress.ip_network(cidr, strict=False))
+        except Exception:
+            raise HTTPException(400, "Neplatná IP/CIDR: " + cidr)
+        if cidr in seen:
+            continue
+        seen.add(cidr)
+        clean.append({"cidr": cidr, "enabled": bool(item.get("enabled", True))})
+    if mode == "ip" and not any(x["enabled"] for x in clean):
+        raise HTTPException(400, "Musí zůstat alespoň jedno aktivní IP/CIDR pravidlo.")
+    setting_set("management_access_mode", mode)
+    setting_set("management_access_rules", json.dumps(clean, separators=(",", ":")))
+    setting_set("management_access_sources", "\n".join(x["cidr"] for x in clean if x["enabled"]))
+    applied = await _apply_management_access_policy()
+    return {"ok": True, "mode": mode, "rules": clean, "applied": applied}
+
+
 @app.put("/api/account/password")
 async def account_password(request: Request, session=Depends(require_csrf)):
     p = await request.json()
@@ -163,7 +207,14 @@ async def _apply_management_access_policy():
     mode = setting_get("management_access_mode", "ip").strip().lower()
     if mode in ("country", "ip_country"):
         raise HTTPException(501, "GeoIP enforcement zatím není aktivní; použij IP / CIDR.")
-    sources = [x.strip() for x in setting_get("management_access_sources", "").splitlines() if x.strip()]
+    rules_raw = setting_get("management_access_rules", "")
+    try:
+        rules = json.loads(rules_raw) if rules_raw else []
+    except Exception:
+        rules = []
+    sources = [str(x.get("cidr") or "").strip() for x in rules if x.get("enabled", True) and str(x.get("cidr") or "").strip()]
+    if not rules:
+        sources = [x.strip() for x in setting_get("management_access_sources", "").splitlines() if x.strip()]
     if mode == "ip" and not sources:
         raise HTTPException(400, "Pro režim IP / CIDR musí být zadaná alespoň jedna povolená adresa.")
     if mode == "any":
@@ -290,6 +341,8 @@ log:
     else:
         record = await vas_create_record(zone, host, "CNAME", anchor, 60)
     _public_remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
+    setting_set("dsm_public_hostname", host)
+    setting_set("dsm_public_backend_port", str(port))
     setting_set("dsm_public_enabled", "1")
-    await _apply_management_access_policy(); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
+    await _apply_management_access_policy()
     return {"ok": True, "hostname": host, "target": anchor, "backend": backend_ip + ":" + str(port)}
