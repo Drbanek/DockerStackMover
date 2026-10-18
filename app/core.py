@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.2.6"
+APP_VERSION = "2.2.7"
 import re
 import httpx
 import asyncio
@@ -136,9 +136,16 @@ def init_db():
             management_octet INTEGER NOT NULL UNIQUE,
             public_ip TEXT,
             ssh_user TEXT,
+            proxy_dns_hostname TEXT,
+            dns_auto INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )""")
+        site_cols = {row["name"] for row in conn.execute("PRAGMA table_info(sites)").fetchall()}
+        if "proxy_dns_hostname" not in site_cols:
+            conn.execute("ALTER TABLE sites ADD COLUMN proxy_dns_hostname TEXT")
+        if "dns_auto" not in site_cols:
+            conn.execute("ALTER TABLE sites ADD COLUMN dns_auto INTEGER NOT NULL DEFAULT 1")
         conn.execute("CREATE TABLE IF NOT EXISTS stack_proxy_settings (stack_name TEXT PRIMARY KEY, host TEXT NOT NULL, service TEXT, container_port INTEGER, backend_port INTEGER, https INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL)")
         conn.execute("""CREATE TABLE IF NOT EXISTS stack_proxy_routes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,15 +215,19 @@ def next_management_octet():
         row = conn.execute("SELECT COALESCE(MAX(management_octet), 1) AS value FROM sites").fetchone()
     return max(2, int(row["value"] or 1) + 1)
 
-def save_site(name, lan_cidr, management_octet, public_ip="", ssh_user=""):
+def save_site(name, lan_cidr, management_octet, public_ip="", ssh_user="", proxy_dns_hostname=None, dns_auto=None):
     name = str(name or "").strip().upper()
+    current = get_site(name) or {}
+    proxy_dns = current.get("proxy_dns_hostname") if proxy_dns_hostname is None else str(proxy_dns_hostname or "").strip().lower().rstrip(".")
+    auto = current.get("dns_auto", 1) if dns_auto is None else (1 if dns_auto else 0)
     with db() as conn:
-        conn.execute("""INSERT INTO sites(name,lan_cidr,management_octet,public_ip,ssh_user,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET lan_cidr=excluded.lan_cidr,
+        conn.execute("""INSERT INTO sites(name,lan_cidr,management_octet,public_ip,ssh_user,proxy_dns_hostname,dns_auto,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET lan_cidr=excluded.lan_cidr,
             management_octet=excluded.management_octet, public_ip=excluded.public_ip,
-            ssh_user=excluded.ssh_user, updated_at=excluded.updated_at""",
+            ssh_user=excluded.ssh_user, proxy_dns_hostname=excluded.proxy_dns_hostname,
+            dns_auto=excluded.dns_auto, updated_at=excluded.updated_at""",
             (name, str(lan_cidr).strip(), int(management_octet), str(public_ip or "").strip(),
-             str(ssh_user or "").strip(), utcnow(), utcnow()))
+             str(ssh_user or "").strip(), proxy_dns, auto, utcnow(), utcnow()))
     return get_site(name)
 
 def get_endpoint_settings():
@@ -777,27 +788,33 @@ def _remember_managed_dns(stack_name, route_id, host, zone, record, content, pur
 
 async def ensure_route_dns(stack_name, route_id, host, site):
     if not vas_hosting_enabled():
-        return {"managed": False, "status": "disabled"}
+        return {"managed": False, "status": "provider-not-configured"}
     site = str(site or "").strip().upper()
     site_meta = get_site(site) or {}
+    if not bool(site_meta.get("dns_auto", 1)):
+        return {"managed": False, "status": "site-dns-disabled"}
+    anchor = str(site_meta.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
+    if not anchor:
+        return {"managed": False, "status": "proxy-hostname-not-configured"}
+    if not re.fullmatch(r"[a-z0-9.-]+", anchor) or "." not in anchor:
+        raise RuntimeError("Lokalita " + site + " má neplatný Proxy DNS hostname.")
     public_ip = str(site_meta.get("public_ip") or "").strip()
     if not public_ip:
         settings = get_endpoint_settings()
         proxy_id = next((eid for eid, x in settings.items() if (x.get("site") or "").upper() == site and x.get("role") == "PROXY"), None)
         public_ip = str((settings.get(proxy_id) or {}).get("public_ip") or "").strip()
     if not public_ip:
-        raise RuntimeError("Lokalita " + site + " nemá veřejnou IP pro automatické DNS.")
-    zone, records = await vas_find_zone(host)
-    anchor = "proxy-" + (re.sub(r"[^a-z0-9-]+", "-", site.lower()).strip("-")[:40] or "site") + "." + zone
-    anchor_matches = [r for r in records if _dns_record_fqdn(r, zone) == anchor]
+        return {"managed": False, "status": "public-ip-not-configured"}
+    anchor_zone, anchor_records = await vas_find_zone(anchor)
+    anchor_matches = [r for r in anchor_records if _dns_record_fqdn(r, anchor_zone) == anchor]
     if anchor_matches:
         good = [r for r in anchor_matches if str(r.get("type") or "").upper() == "A" and str(r.get("content") or "").strip() == public_ip]
         if len(good) != len(anchor_matches):
             raise RuntimeError("DNS konflikt: " + anchor + " už existuje a neukazuje výhradně na " + public_ip)
     else:
-        anchor_record = await vas_create_record(zone, anchor, "A", public_ip, 60)
-        _remember_managed_dns(stack_name, None, anchor, zone, anchor_record, public_ip, "proxy-anchor")
-        records = await vas_dns_records(zone)
+        anchor_record = await vas_create_record(anchor_zone, anchor, "A", public_ip, 60)
+        _remember_managed_dns(stack_name, None, anchor, anchor_zone, anchor_record, public_ip, "proxy-anchor")
+    zone, records = await vas_find_zone(host)
     route_matches = [r for r in records if _dns_record_fqdn(r, zone) == host]
     expected = anchor
     if route_matches:
