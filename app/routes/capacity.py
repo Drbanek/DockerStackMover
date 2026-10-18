@@ -213,7 +213,13 @@ async def proxy_public_readiness(endpoint_id, settings):
             zone, records = await vas_find_zone(anchor)
             matches = [r for r in records if dns_record_fqdn(r, zone) == anchor and str(r.get("type") or "").upper() == "A"]
             values = sorted({str(r.get("content") or "").strip() for r in matches})
-            dns = {"ok": values == [detected], "message": anchor + " → " + (", ".join(values) if values else "missing") + " · expected " + detected}
+            if not matches:
+                created = await vas_create_record(zone, anchor, "A", detected, 60)
+                dns = {"ok": True, "message": anchor + " → " + detected + " · created automatically"}
+            elif values == [detected]:
+                dns = {"ok": True, "message": anchor + " → " + detected}
+            else:
+                dns = {"ok": False, "message": anchor + " → " + (", ".join(values) if values else "missing") + " · expected " + detected + " · conflict not overwritten"}
         except Exception as exc:
             dns = {"ok": False, "message": str(exc)}
     return {"public_ip": {"ok": public_ok and bool(configured), "message": public_message, "detected": detected, "configured": configured}, "dns": dns}
