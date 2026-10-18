@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import re
 from pathlib import Path
@@ -153,7 +154,18 @@ async def system_public_access_enable(request: Request, session=Depends(require_
     port = int(p.get("backend_port") or 8082)
     if not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host: raise HTTPException(400, "Neplatný DSM hostname.")
     if not (1 <= port <= 65535): raise HTTPException(400, "Neplatný backend port.")
-    backend_ip = str(setting_get("wg_hub_lan_ip", "") or "").strip()
+    settings = get_endpoint_settings()
+    main_name = next((x.get("name") for x in get_sites() if int(x.get("management_octet") or 0) == 1), "")
+    control = next((x for x in settings.values() if str(x.get("site") or "").upper() == str(main_name).upper() and str(x.get("role") or "").upper() == "CONTROL"), None)
+    backend_ip = str((control or {}).get("lan_ip") or (control or {}).get("host_ip") or setting_get("wg_hub_lan_ip", "") or "").strip()
+    if not backend_ip:
+        # CONTROL bootstrap convention is .9; use it only when MAIN LAN is known.
+        main_site = next((x for x in get_sites() if str(x.get("name") or "").upper() == str(main_name).upper()), None)
+        if main_site and main_site.get("lan_cidr"):
+            try:
+                backend_ip = str(ipaddress.ip_address(str(main_site["lan_cidr"]).split("/")[0]) + 9)
+            except Exception:
+                backend_ip = ""
     if not backend_ip: raise HTTPException(409, "CONTROL/MGMT LAN IP není známá.")
     main = next((x for x in get_sites() if int(x.get("management_octet") or 0) == 1), None)
     if not main: raise HTTPException(409, "MAIN lokalita nebyla nalezena.")
