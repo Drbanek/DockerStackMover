@@ -114,6 +114,35 @@ async def _remove_dynamic_file(proxy_id, filename):
     )
 
 
+async def _remove_conflicting_dynamic_files(proxy_id, keep_filename, hosts):
+    """Remove stale DSM Traefik files that claim any hostname owned by keep_filename.
+
+    Older DSM versions could leave a previous stack-slug file behind. Traefik then
+    loaded both files and two routers claimed the same Host rule. Only DSM-managed
+    files are considered; unrelated/manual Traefik configuration is never touched.
+    """
+    if not re.fullmatch(r"[a-z0-9._-]+\.ya?ml", keep_filename):
+        raise RuntimeError("Unsafe Traefik filename")
+    clean_hosts = []
+    for host in hosts or []:
+        host = str(host or "").strip().lower().rstrip(".")
+        if not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host:
+            raise RuntimeError("Unsafe Traefik host")
+        if host not in clean_hosts:
+            clean_hosts.append(host)
+    if not clean_hosts:
+        return
+    patterns = " ".join("-e 'Host(\`" + host + "\`)' " for host in clean_hosts)
+    cmd = (
+        'for f in /dynamic/dsm-*.yml /dynamic/dsm-*.yaml; do '
+        '[ -f "$f" ] || continue; '
+        '[ "$(basename "$f")" = ' + json.dumps(keep_filename) + ' ] && continue; '
+        'if grep -Fq ' + patterns + '"$f"; then rm -f -- "$f"; fi; '
+        'done'
+    )
+    await _run_proxy_helper(proxy_id, cmd, binds=["/opt/traefik/dynamic:/dynamic"])
+
+
 async def sync_stack_proxy(detail, endpoint_id):
     domains = detail.get("domains") or []
     if not domains:
@@ -177,6 +206,14 @@ async def sync_stack_proxy(detail, endpoint_id):
     config = "\n".join(["http:", "  routers:"] + routers + ["  services:"] + services) + "\n"
     filename = "dsm-" + base + ".yml"
     await _write_dynamic_file(proxy_id, filename, config)
+    # The new complete config is live first; then remove stale DSM files that
+    # still claim one of this stack's hostnames. This prevents duplicate Host()
+    # routers after stack/domain renames while avoiding a cutover outage.
+    await _remove_conflicting_dynamic_files(
+        proxy_id,
+        filename,
+        [str(d.get("host") or "").strip().lower().rstrip(".") for d in domains],
+    )
     return {"configured": True, "site": site, "proxy_endpoint_id": proxy_id, "lan_ip": backend_ip, "backend_ip": backend_ip, "file": filename, "domains": len(domains)}
 
 
