@@ -410,15 +410,24 @@ function managementAccessModeChanged(){
  if(mode==="any"){w.style.display="block";w.textContent="VAROVÁNÍ: DSM bude dostupný z libovolné veřejné IP. Používej pouze dočasně a se silným heslem."}
  else{w.style.display="none";w.textContent=""}
 }
+let managementAccessRules=[];
+function renderManagementAccessRules(){
+ const box=document.getElementById("mgmtAccessRules");if(!box)return;
+ box.innerHTML=managementAccessRules.length?managementAccessRules.map((r,i)=>"<div class='item' style='display:flex;align-items:center;justify-content:space-between;gap:10px'><code>"+esc(r.cidr)+"</code><div><label style='display:inline-flex;align-items:center;gap:5px'><input type='checkbox' "+(r.enabled?"checked":"")+" onchange='managementAccessRules["+i+"].enabled=this.checked'> Povoleno</label> <button class='secondary' onclick='managementAccessRules.splice("+i+",1);renderManagementAccessRules()'>Smazat</button></div></div>").join(""):"<span class='muted'>Žádná pravidla.</span>";
+}
+function addManagementAccessRule(){
+ const el=document.getElementById("mgmtAccessNewRule"),v=el.value.trim();if(!v)return;
+ if(!managementAccessRules.some(r=>r.cidr===v))managementAccessRules.push({cidr:v,enabled:true});
+ el.value="";renderManagementAccessRules();
+}
 async function loadManagementAccess(){
- try{const d=await getJson("/api/app-settings");document.getElementById("mgmtAccessMode").value=d.management_access_mode||"ip";document.getElementById("mgmtAccessSources").value=d.management_access_sources||"";document.getElementById("mgmtAccessCountries").value=d.management_access_countries||"CZ";managementAccessModeChanged()}catch(_){}
+ try{const d=await getJson("/api/system/management-access-rules");document.getElementById("mgmtAccessMode").value=d.mode||"ip";managementAccessRules=d.rules||[];renderManagementAccessRules();managementAccessModeChanged()}catch(e){document.getElementById("mgmtAccessState").textContent="✕ "+String(e.message||e)}
 }
 async function saveManagementAccess(){
  const mode=document.getElementById("mgmtAccessMode").value,state=document.getElementById("mgmtAccessState");
  if(mode==="any"&&!confirm("DSM bude veřejně dostupný z CELÉHO INTERNETU.\n\nOpravdu chceš neomezený přístup?"))return;
- const body={management_access_mode:mode,management_access_sources:document.getElementById("mgmtAccessSources").value,management_access_countries:document.getElementById("mgmtAccessCountries").value};
- state.textContent="Ukládám politiku…";
- try{const r=await fetch("/api/app-settings",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());const d=await r.json();state.textContent=d.management_firewall_applied?"✓ Politika uložena a aktivně aplikována na MAIN PROXY.":"✓ Politika uložena; veřejné DSM zatím není aktivní."}catch(e){state.textContent="✕ "+e.message}
+ state.textContent="Aplikuji pravidla na MAIN PROXY…";
+ try{const r=await fetch("/api/system/management-access-rules",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({mode,rules:managementAccessRules})});const d=await r.json();if(!r.ok)throw new Error(d.detail||("HTTP "+r.status));managementAccessRules=d.rules||[];renderManagementAccessRules();state.textContent=d.applied?"✓ Pravidla jsou aktivní na MAIN PROXY.":"✓ Pravidla uložena; veřejné DSM zatím není aktivní."}catch(e){state.textContent="✕ "+String(e.message||e)}
 }
 
 async function loadDsmPublicAccess(){
