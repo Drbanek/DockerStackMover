@@ -132,4 +132,5 @@ async def update_dsm(session=Depends(require_csrf)):
         tmp.replace(req)
     except Exception as exc:
         raise HTTPException(500, "Nelze předat požadavek hostu: " + str(exc))
-    return {"ok": True, "message": "Aktualizace byla předána hostu. DSM se během aktualizace restartuje."}
+    return {"ok": True, "message": "Aktualizace byla předána hostu. DSM se během aktualizace restartuje.",
+            "current_version": APP_VERSION, "target_version": latest_version if 'latest_version' in locals() else ""}
