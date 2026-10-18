@@ -77,8 +77,17 @@ async def _run_proxy_helper(proxy_id, cmd, env=None, host_network=False, binds=N
             await asyncio.sleep(0.5)
         if code is None:
             raise RuntimeError("PROXY helper timeout")
+        cid = containers[0].get("Id") if containers else None
+        if cid:
+            logs = await docker_request(proxy_id, "GET", "/containers/" + cid + "/logs",
+                                        params={"stdout": "1", "stderr": "1"})
+            logs_text = logs.text
         if code != 0:
-            raise RuntimeError("PROXY helper failed (" + str(code) + "): " + logs_text)
+            raise RuntimeError("PROXY helper failed (" + str(code) + "): " + logs_text[-1000:])
+        # Docker multiplexed log streams can contain control bytes when read as
+        # plain text through the remote API. Strip only those framing bytes and
+        # return the helper's actual stdout to callers such as public-IP checks.
+        return "".join(ch for ch in logs_text if ch in "\\r\\n\\t" or ord(ch) >= 32).strip()
     finally:
         async with client() as hc:
             await hc.delete("/api/stacks/" + str(stack_id), params={"endpointId": proxy_id})
