@@ -391,3 +391,20 @@ async function identifyProvisionHosts(){
  d.hosts.forEach(h=>{const idx=provisionHosts.findIndex(x=>x.ip===h.ip);if(idx<0||!h.hostname)return;provisionHosts[idx].hostname=h.hostname;const input=document.querySelector(".provName[data-index='"+idx+"']");if(input){input.placeholder=h.hostname;if(!/^(ubuntu|localhost)(-|$)/i.test(h.hostname)&&!input.value)input.value=h.hostname;const label=input.closest(".provisionHost")?.querySelector("label strong");if(label)label.textContent=h.ip+" · "+h.hostname}});
  previewProvisionSelection()
 }
+
+function managementAccessModeChanged(){
+ const mode=document.getElementById("mgmtAccessMode")?.value||"ip",w=document.getElementById("mgmtAccessWarning");
+ if(!w)return;
+ if(mode==="any"){w.style.display="block";w.textContent="VAROVÁNÍ: DSM bude dostupný z libovolné veřejné IP. Používej pouze dočasně a se silným heslem."}
+ else{w.style.display="none";w.textContent=""}
+}
+async function loadManagementAccess(){
+ try{const d=await getJson("/api/app-settings");document.getElementById("mgmtAccessMode").value=d.management_access_mode||"ip";document.getElementById("mgmtAccessSources").value=d.management_access_sources||"";document.getElementById("mgmtAccessCountries").value=d.management_access_countries||"CZ";managementAccessModeChanged()}catch(_){}
+}
+async function saveManagementAccess(){
+ const mode=document.getElementById("mgmtAccessMode").value,state=document.getElementById("mgmtAccessState");
+ if(mode==="any"&&!confirm("DSM bude veřejně dostupný z CELÉHO INTERNETU.\n\nOpravdu chceš neomezený přístup?"))return;
+ const body={management_access_mode:mode,management_access_sources:document.getElementById("mgmtAccessSources").value,management_access_countries:document.getElementById("mgmtAccessCountries").value};
+ state.textContent="Ukládám politiku…";
+ try{const r=await fetch("/api/app-settings",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());state.textContent="✓ Politika uložena · aplikace firewallu bude provedena bezpečnou transakcí při přípravě CONTROL serveru."}catch(e){state.textContent="✕ "+e.message}
+}
