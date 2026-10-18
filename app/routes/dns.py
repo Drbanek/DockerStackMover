@@ -101,7 +101,7 @@ async def dns_managed_inventory(session=Depends(require_permission("dns_read")))
         except Exception as exc:
             status = "error"
             actual = str(exc)
-        items.append({**row, "source": "managed", "status": status, "actual_content": actual})
+        items.append({**row, "source": "managed", "managed": True, "status": status, "actual_content": actual})
     # Site proxy anchors are infrastructure records and pre-date route ownership.
     # Show them even when they are not yet present in managed_dns_records.
     for site in get_sites():
@@ -129,6 +129,6 @@ async def dns_managed_inventory(session=Depends(require_permission("dns_read")))
             continue
         items.append({"id": None, "stack_name": "", "route_id": None, "host": host, "zone": zone,
                       "provider_record_id": record_id, "record_type": "A", "expected_content": expected,
-                      "purpose": "site-anchor", "created_at": "", "source": "site",
+                      "purpose": "site-anchor", "created_at": "", "source": "site", "managed": False,
                       "site": site.get("name"), "status": status, "actual_content": actual})
     return {"items": items}
