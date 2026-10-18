@@ -173,6 +173,16 @@ async def proxy_public_readiness(endpoint_id, settings):
     except Exception as exc:
         detect_error = str(exc)
     public_ok = bool(detected)
+    if public_ok and not configured and site_name and site:
+        # First successful PROXY detection becomes the site's configured public
+        # IP. Later changes are never silently accepted: a mismatch must still
+        # be reviewed explicitly.
+        save_site(site_name, site.get("lan_cidr") or "", site.get("management_octet") or 1,
+                  public_ip=detected, ssh_user=site.get("ssh_user") or "",
+                  proxy_dns_hostname=site.get("proxy_dns_hostname"),
+                  dns_auto=bool(site.get("dns_auto", 1)))
+        site = get_site(site_name) or site
+        configured = detected
     if public_ok and configured and detected != configured:
         public_ok = False
     public_message = ("Detected " + detected) if detected else ("Public IPv4 could not be detected" + (": " + detect_error if detect_error else ""))
