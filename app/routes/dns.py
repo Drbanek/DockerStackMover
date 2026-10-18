@@ -107,6 +107,12 @@ async def dns_managed_inventory(session=Depends(require_permission("dns_read")))
     for site in get_sites():
         host = str(site.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
         expected = str(site.get("public_ip") or "").strip()
+        if not expected:
+            endpoint_settings = get_endpoint_settings()
+            proxy_id = next((eid for eid, meta in endpoint_settings.items()
+                             if str(meta.get("site") or "").strip().upper() == str(site.get("name") or "").strip().upper()
+                             and str(meta.get("role") or "").strip().upper() == "PROXY"), None)
+            expected = str((endpoint_settings.get(proxy_id) or {}).get("public_ip") or "").strip()
         if not host:
             continue
         status, actual, zone, record_id = "missing", "", "", ""
