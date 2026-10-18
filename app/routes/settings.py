@@ -184,6 +184,45 @@ async def system_public_access_enable(request: Request, session=Depends(require_
     if not anchor: raise HTTPException(409, "MAIN lokalita nemá Proxy DNS hostname.")
     from .proxy import _site_proxy, _run_proxy_helper, _write_dynamic_file
     proxy_id = _site_proxy(main["name"])
+    # Repair static Traefik config on already provisioned PROXY hosts as well.
+    # EntryPoint redirects are the canonical Traefik way to enforce HTTP -> HTTPS
+    # and remain compatible with the internal ACME HTTP-01 challenge router.
+    static_config = """api:
+  dashboard: false
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+log:
+  level: INFO
+"""
+    import base64
+    encoded_static = base64.b64encode(static_config.encode("utf-8")).decode("ascii")
+    await _run_proxy_helper(
+        proxy_id,
+        'printf "%s" ' + json.dumps(encoded_static) + ' | base64 -d > /config/traefik.yml && test -s /config/traefik.yml',
+        binds=["/opt/traefik/config:/config"],
+    )
+    restart = await docker_request(proxy_id, "POST", "/containers/traefik/restart", params={"t": "10"})
+    if restart.status_code not in (204, 200):
+        raise HTTPException(502, "Traefik restart selhal: HTTP " + str(restart.status_code))
     await _run_proxy_helper(proxy_id, "nc -z -w 5 " + backend_ip + " " + str(port), host_network=True)
     rule = "Host(" + chr(96) + host + chr(96) + ")"
     config = "\n".join(["http:", "  routers:", "    dsm-system-web:", "      rule: " + json.dumps(rule),
