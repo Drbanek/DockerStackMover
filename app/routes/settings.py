@@ -146,6 +146,10 @@ def _public_dns_record_fqdn(record, zone):
         return zone
     return name if name.endswith("." + zone) else name + "." + zone
 
+def _public_remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose="route"):
+    from .. import core
+    return core._remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose)
+
 @app.get("/api/system/public-access")
 async def system_public_access_status(session=Depends(require_permission("admin"))):
     return {"enabled": setting_get("dsm_public_enabled", "0") == "1",
@@ -199,6 +203,6 @@ async def system_public_access_enable(request: Request, session=Depends(require_
         record = cname[0]
     else:
         record = await vas_create_record(zone, host, "CNAME", anchor, 60)
-    _remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
+    _public_remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
     setting_set("dsm_public_enabled", "1"); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
     return {"ok": True, "hostname": host, "target": anchor, "backend": backend_ip + ":" + str(port)}
