@@ -1,6 +1,6 @@
 import os
 
-APP_VERSION = "2.2.5"
+APP_VERSION = "2.2.6"
 import re
 import httpx
 import asyncio
@@ -171,6 +171,20 @@ def init_db():
         conn.execute("""INSERT OR IGNORE INTO stack_proxy_routes(stack_name,host,service,container_port,backend_port,https,updated_at)
             SELECT stack_name,host,COALESCE(service,''),COALESCE(container_port,0),COALESCE(backend_port,0),https,updated_at
             FROM stack_proxy_settings WHERE host IS NOT NULL AND host != ''""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS managed_dns_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stack_name TEXT NOT NULL,
+            route_id INTEGER,
+            host TEXT NOT NULL,
+            zone TEXT NOT NULL,
+            provider_record_id TEXT NOT NULL,
+            record_type TEXT NOT NULL,
+            expected_content TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT 'route',
+            created_at TEXT NOT NULL,
+            UNIQUE(provider_record_id, zone)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_managed_dns_route ON managed_dns_records(stack_name, route_id)")
         conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS app_users (username TEXT PRIMARY KEY, password_hash TEXT NOT NULL, updated_at TEXT NOT NULL)")
         user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(app_users)").fetchall()}
@@ -718,3 +732,109 @@ async def vas_update_a_record(zone, record_id, host, content, ttl=60):
     if verified.get("content") != content:
         raise RuntimeError("DNS update verification failed for " + host + ": expected " + content + ", got " + str(verified.get("content")))
     return verified
+
+
+def _dns_record_fqdn(record, zone):
+    name = str(record.get("name") or "").strip().rstrip(".").lower()
+    zone = str(zone or "").strip().rstrip(".").lower()
+    if not name or name == "@" or name == zone:
+        return zone
+    return name if name.endswith("." + zone) else name + "." + zone
+
+async def vas_find_zone(host):
+    fqdn, zones = split_dns_name(host)
+    last_error = None
+    for zone in zones:
+        try:
+            return zone, await vas_dns_records(zone)
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError("DNS zone not found for " + fqdn + (": " + str(last_error) if last_error else ""))
+
+async def vas_create_record(zone, host, record_type, content, ttl=60):
+    fqdn = str(host).strip().rstrip(".").lower()
+    relative = fqdn[:-len(zone)-1] if fqdn.endswith("." + zone) else ("" if fqdn == zone else fqdn)
+    payload = {"name": relative or zone, "content": str(content).rstrip("."), "type": record_type, "ttl": int(ttl or 60)}
+    api_url, api_key = vas_config()
+    async with httpx.AsyncClient(base_url=api_url, headers={"X-API-Key": api_key, "Content-Type": "application/json"}, timeout=30) as c:
+        r = await c.post("/domains/" + zone + "/dns-records", json=payload)
+        if r.status_code not in (200, 201, 204):
+            raise RuntimeError("Váš Hosting DNS create failed for " + fqdn + ": HTTP " + str(r.status_code) + " " + r.text[:300])
+    records = await vas_dns_records(zone)
+    matches = [x for x in records if _dns_record_fqdn(x, zone) == fqdn and str(x.get("type") or "").upper() == record_type.upper()
+               and str(x.get("content") or "").rstrip(".").lower() == str(content).rstrip(".").lower()]
+    if len(matches) != 1:
+        raise RuntimeError("DNS create verification is ambiguous for " + fqdn)
+    return matches[0]
+
+def _remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose="route"):
+    with db() as conn:
+        conn.execute("""INSERT OR IGNORE INTO managed_dns_records
+            (stack_name,route_id,host,zone,provider_record_id,record_type,expected_content,purpose,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (str(stack_name), int(route_id) if route_id is not None else None, host, zone, str(record["id"]),
+             str(record.get("type") or ""), str(content).rstrip("."), purpose, utcnow()))
+
+async def ensure_route_dns(stack_name, route_id, host, site):
+    if not vas_hosting_enabled():
+        return {"managed": False, "status": "disabled"}
+    site = str(site or "").strip().upper()
+    site_meta = get_site(site) or {}
+    public_ip = str(site_meta.get("public_ip") or "").strip()
+    if not public_ip:
+        settings = get_endpoint_settings()
+        proxy_id = next((eid for eid, x in settings.items() if (x.get("site") or "").upper() == site and x.get("role") == "PROXY"), None)
+        public_ip = str((settings.get(proxy_id) or {}).get("public_ip") or "").strip()
+    if not public_ip:
+        raise RuntimeError("Lokalita " + site + " nemá veřejnou IP pro automatické DNS.")
+    zone, records = await vas_find_zone(host)
+    anchor = "proxy-" + _safe_name(site) + "." + zone
+    anchor_matches = [r for r in records if _dns_record_fqdn(r, zone) == anchor]
+    if anchor_matches:
+        good = [r for r in anchor_matches if str(r.get("type") or "").upper() == "A" and str(r.get("content") or "").strip() == public_ip]
+        if len(good) != len(anchor_matches):
+            raise RuntimeError("DNS konflikt: " + anchor + " už existuje a neukazuje výhradně na " + public_ip)
+    else:
+        anchor_record = await vas_create_record(zone, anchor, "A", public_ip, 60)
+        _remember_managed_dns(stack_name, None, anchor, zone, anchor_record, public_ip, "proxy-anchor")
+        records = await vas_dns_records(zone)
+    route_matches = [r for r in records if _dns_record_fqdn(r, zone) == host]
+    expected = anchor
+    if route_matches:
+        good = [r for r in route_matches if str(r.get("type") or "").upper() == "CNAME"
+                and str(r.get("content") or "").rstrip(".").lower() == expected.lower()]
+        if len(good) == len(route_matches) == 1:
+            return {"managed": False, "status": "external-existing", "zone": zone, "type": "CNAME", "target": expected}
+        raise RuntimeError("DNS konflikt: " + host + " už má jiný záznam. DSM jej automaticky nepřepíše.")
+    record = await vas_create_record(zone, host, "CNAME", expected, 60)
+    _remember_managed_dns(stack_name, route_id, host, zone, record, expected, "route")
+    return {"managed": True, "status": "created", "zone": zone, "record_id": str(record["id"]), "type": "CNAME", "target": expected}
+
+async def delete_route_dns(stack_name, route_id, host):
+    with db() as conn:
+        rows = [dict(r) for r in conn.execute("""SELECT * FROM managed_dns_records
+            WHERE stack_name=? AND route_id=? AND purpose='route'""", (str(stack_name), int(route_id))).fetchall()]
+    if not rows:
+        return {"managed": False, "status": "not-owned"}
+    api_url, api_key = vas_config()
+    deleted = 0
+    for owned in rows:
+        records = await vas_dns_records(owned["zone"])
+        current = next((r for r in records if str(r.get("id")) == str(owned["provider_record_id"])), None)
+        if not current:
+            with db() as conn:
+                conn.execute("DELETE FROM managed_dns_records WHERE id=?", (owned["id"],))
+            continue
+        same = (_dns_record_fqdn(current, owned["zone"]) == owned["host"]
+                and str(current.get("type") or "").upper() == owned["record_type"].upper()
+                and str(current.get("content") or "").rstrip(".").lower() == owned["expected_content"].rstrip(".").lower())
+        if not same:
+            raise RuntimeError("DNS záznam " + owned["host"] + " byl mimo DSM změněn; z bezpečnostních důvodů jej nemažu.")
+        async with httpx.AsyncClient(base_url=api_url, headers={"X-API-Key": api_key}, timeout=30) as c:
+            r = await c.delete("/domains/" + owned["zone"] + "/dns-records/" + owned["provider_record_id"])
+            if r.status_code not in (200, 204):
+                raise RuntimeError("Váš Hosting DNS delete failed for " + owned["host"] + ": HTTP " + str(r.status_code))
+        with db() as conn:
+            conn.execute("DELETE FROM managed_dns_records WHERE id=?", (owned["id"],))
+        deleted += 1
+    return {"managed": True, "status": "deleted", "deleted": deleted}
