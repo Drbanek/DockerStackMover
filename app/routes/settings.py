@@ -244,7 +244,7 @@ async def _apply_management_access_policy():
     lines += ["          - " + json.dumps(x) for x in sources]
     lines += ["  services:", "    dsm-system:", "      loadBalancer:", "        servers:",
               "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]
-    await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", "\\n".join(lines) + "\\n")
+    await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", "\n".join(lines) + "\n")
     return True
 
 
