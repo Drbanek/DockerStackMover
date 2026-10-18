@@ -45,7 +45,18 @@ async def _stack_preflight(stack_id: int, target_id: int, progress=None):
         proxies=[s for s in es.values() if (s.get("role") or "").upper()=="PROXY" and (s.get("site") or "").strip().upper()==site]
         add("proxy_lan_ip",bool(lan),"Target LAN IP: "+lan if lan else "Target LAN IP is required for application proxy traffic")
         progress("proxy_site","running","Proxy lokality…")
-        add("proxy_site",bool(site) and len(proxies)==1,"Traefik PROXY ready for "+site if site and len(proxies)==1 else "Target site must have exactly one PROXY endpoint")
+        proxy_ok = bool(site) and len(proxies)==1
+        proxy_message = "Target site must have exactly one PROXY endpoint"
+        if proxy_ok:
+            proxy_id = next(eid for eid,x in es.items() if (x.get("role") or "").upper()=="PROXY" and (x.get("site") or "").strip().upper()==site)
+            proxy_endpoint = next((e for e in endpoints if int(e.get("Id"))==int(proxy_id)), None)
+            if proxy_endpoint:
+                proxy_ready = await node_readiness(proxy_endpoint)
+                proxy_ok = bool(proxy_ready.get("ready"))
+                failed = [k+": "+str((proxy_ready.get("checks",{}).get(k) or {}).get("message") or "")
+                          for k in proxy_ready.get("required_checks",[]) if not (proxy_ready.get("checks",{}).get(k) or {}).get("ok")]
+                proxy_message = "PROXY ready for "+site if proxy_ok else "PROXY not ready: "+" · ".join(failed)
+        add("proxy_site",proxy_ok,proxy_message)
     else:
         add("proxy_lan_ip",True,"Stack nemá proxy doménu","warning")
         progress("proxy_site","running","Proxy lokality…")
