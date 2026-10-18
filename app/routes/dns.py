@@ -75,11 +75,18 @@ async def dns_sync_routes(session=Depends(require_csrf)):
 @app.get("/api/dns/managed")
 async def dns_managed_inventory(session=Depends(require_permission("dns_read"))):
     """DSM-owned DNS inventory with live provider verification."""
+    from .. import core
     items = []
+    configured_anchors = {str(site.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
+                          for site in get_sites() if str(site.get("proxy_dns_hostname") or "").strip()}
     with db() as conn:
         owned = [dict(r) for r in conn.execute("SELECT * FROM managed_dns_records ORDER BY purpose, host").fetchall()]
     seen = set()
     for row in owned:
+        # Legacy versions could persist a per-zone proxy anchor (for example
+        # proxy-dc1.itsit.cz). The site proxy_dns_hostname is now authoritative.
+        if str(row.get("purpose") or "") == "proxy-anchor" and str(row.get("host") or "").strip().lower().rstrip(".") not in configured_anchors:
+            continue
         key = (str(row.get("zone") or ""), str(row.get("provider_record_id") or ""))
         seen.add(key)
         status, actual = "unknown", ""
@@ -105,7 +112,7 @@ async def dns_managed_inventory(session=Depends(require_permission("dns_read")))
         status, actual, zone, record_id = "missing", "", "", ""
         try:
             zone, records = await vas_find_zone(host)
-            matches = [r for r in records if _dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "A"]
+            matches = [r for r in records if core._dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "A"]
             if matches:
                 record_id = str(matches[0].get("id") or "")
                 actual = str(matches[0].get("content") or "").strip()
