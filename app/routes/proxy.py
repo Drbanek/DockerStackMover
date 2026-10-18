@@ -132,7 +132,7 @@ async def _remove_conflicting_dynamic_files(proxy_id, keep_filename, hosts):
             clean_hosts.append(host)
     if not clean_hosts:
         return
-    patterns = " ".join("-e 'Host(\`" + host + "\`)' " for host in clean_hosts)
+    patterns = " ".join("-e 'Host(`" + host + "`)' " for host in clean_hosts)
     cmd = (
         'for f in /dynamic/dsm-*.yml /dynamic/dsm-*.yaml; do '
         '[ -f "$f" ] || continue; '
