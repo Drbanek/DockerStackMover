@@ -36,7 +36,10 @@ async def app_settings(session=Depends(require_permission("admin"))):
         "portainer_token_set": bool(setting_get("portainer_token", PORTAINER_TOKEN)),
         "vas_hosting_api_key_set": bool(setting_get("vas_hosting_api_key", VAS_HOSTING_API_KEY)),
         "vas_hosting_api_url": setting_get("vas_hosting_api_url", VAS_HOSTING_API_URL),
-        "language": setting_get("language","cs")
+        "language": setting_get("language","cs"),
+        "management_access_mode": setting_get("management_access_mode","ip"),
+        "management_access_sources": setting_get("management_access_sources",""),
+        "management_access_countries": setting_get("management_access_countries","CZ")
     }
 
 @app.put("/api/app-settings")
@@ -48,6 +51,23 @@ async def app_settings_save(request: Request, session=Depends(require_csrf)):
     if p.get("vas_hosting_api_key"): setting_set("vas_hosting_api_key", str(p["vas_hosting_api_key"]).strip(), True)
     if "vas_hosting_api_url" in p: setting_set("vas_hosting_api_url", str(p["vas_hosting_api_url"]).strip().rstrip("/"))
     if "language" in p: setting_set("language", "en" if str(p["language"]).lower()=="en" else "cs")
+    if "management_access_mode" in p:
+        mode=str(p["management_access_mode"]).strip().lower()
+        if mode not in ("ip","country","ip_country","any"): raise HTTPException(400,"Neplatný režim management firewallu.")
+        setting_set("management_access_mode",mode)
+    if "management_access_sources" in p:
+        values=[]
+        for raw in str(p["management_access_sources"] or "").replace(",", "\n").splitlines():
+            raw=raw.strip()
+            if not raw: continue
+            try: ipaddress.ip_network(raw,strict=False)
+            except Exception: raise HTTPException(400,"Neplatná IP/CIDR: "+raw)
+            values.append(raw)
+        setting_set("management_access_sources","\n".join(values))
+    if "management_access_countries" in p:
+        countries=sorted({x.strip().upper() for x in re.split(r"[,\s]+",str(p["management_access_countries"] or "")) if x.strip()})
+        if any(not re.fullmatch(r"[A-Z]{2}",x) for x in countries): raise HTTPException(400,"Země musí být ISO kód, např. CZ.")
+        setting_set("management_access_countries",",".join(countries))
     return {"ok": True, "restart_required": False}
 
 @app.put("/api/account/password")
