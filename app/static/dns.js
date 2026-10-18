@@ -24,7 +24,7 @@ async function loadManagedDns(){
   const body=document.createElement("tbody");
   const purpose={route:"Aplikační route",anchor:"PROXY anchor","site-anchor":"PROXY anchor",system:"DSM systém"};
   rows.forEach(r=>{const tr=document.createElement("tr"),ok=r.status==="ok";
-   tr.innerHTML="<td><strong>"+esc(r.host)+"</strong><div class='muted'>"+esc(r.site||r.stack_name||"")+"</div></td><td>"+esc(r.record_type)+"</td><td>"+esc(r.expected_content||"")+(r.status==="drift"?"<div class='error'>DNS: "+esc(r.actual_content||"")+"</div>":"")+"</td><td><span class='badge running'>DSM MANAGED</span><div class='muted'>"+esc(purpose[r.purpose]||r.purpose||"")+"</div></td><td><span class='badge "+(ok?"running":"stopped")+"'>"+(ok?"OK":esc(String(r.status||"").toUpperCase()))+"</span></td>";
+   tr.innerHTML="<td><strong>"+esc(r.host)+"</strong><div class='muted'>"+esc(r.site||r.stack_name||"")+"</div></td><td>"+esc(r.record_type)+"</td><td>"+esc(r.expected_content||"")+(r.status==="drift"?"<div class='error'>DNS: "+esc(r.actual_content||"")+"</div>":"")+"</td><td><span class='badge "+(r.managed!==false?"running":"")+"'>"+(r.managed!==false?"DSM MANAGED":"EXTERNAL")+"</span><div class='muted'>"+esc(purpose[r.purpose]||r.purpose||"")+"</div></td><td><span class='badge "+(ok?"running":"stopped")+"'>"+(ok?"OK":esc(String(r.status||"").toUpperCase()))+"</span></td>";
    body.appendChild(tr)});
   table.appendChild(body);box.innerHTML="";box.appendChild(table)
  }catch(e){box.innerHTML='<div class="error item">'+esc(e.message)+"</div>"}
