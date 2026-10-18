@@ -418,7 +418,7 @@ async function saveManagementAccess(){
  if(mode==="any"&&!confirm("DSM bude veřejně dostupný z CELÉHO INTERNETU.\n\nOpravdu chceš neomezený přístup?"))return;
  const body={management_access_mode:mode,management_access_sources:document.getElementById("mgmtAccessSources").value,management_access_countries:document.getElementById("mgmtAccessCountries").value};
  state.textContent="Ukládám politiku…";
- try{const r=await fetch("/api/app-settings",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());state.textContent="✓ Politika uložena · aplikace firewallu bude provedena bezpečnou transakcí při přípravě CONTROL serveru."}catch(e){state.textContent="✕ "+e.message}
+ try{const r=await fetch("/api/app-settings",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());const d=await r.json();state.textContent=d.management_firewall_applied?"✓ Politika uložena a aktivně aplikována na MAIN PROXY.":"✓ Politika uložena; veřejné DSM zatím není aktivní."}catch(e){state.textContent="✕ "+e.message}
 }
 
 async function loadDsmPublicAccess(){
