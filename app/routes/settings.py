@@ -248,6 +248,23 @@ async def _apply_management_access_policy():
     return True
 
 
+@app.get("/api/system/management-access-diagnostics")
+async def management_access_diagnostics(session=Depends(require_permission("admin"))):
+    main = next((x for x in get_sites() if int(x.get("management_octet") or 0) == 1), None)
+    if not main:
+        raise HTTPException(409, "MAIN lokalita nebyla nalezena.")
+    from .proxy import _site_proxy, _run_proxy_helper
+    proxy_id = _site_proxy(main["name"])
+    content = await _run_proxy_helper(
+        proxy_id,
+        "test -f /dynamic/dsm-system-ui.yml && cat /dynamic/dsm-system-ui.yml",
+        binds=["/opt/traefik/dynamic:/dynamic:ro"],
+    )
+    return {"proxy_endpoint_id": proxy_id, "config": content,
+            "mode": setting_get("management_access_mode", "ip"),
+            "rules": json.loads(setting_get("management_access_rules", "[]") or "[]")}
+
+
 @app.get("/api/system/public-access")
 async def system_public_access_status(session=Depends(require_permission("admin"))):
     return {"enabled": setting_get("dsm_public_enabled", "0") == "1",
@@ -322,14 +339,6 @@ log:
     if restart.status_code not in (204, 200):
         raise HTTPException(502, "Traefik restart selhal: HTTP " + str(restart.status_code))
     await _run_proxy_helper(proxy_id, "nc -z -w 5 " + backend_ip + " " + str(port), host_network=True)
-    rule = "Host(" + chr(96) + host + chr(96) + ")"
-    config = "\n".join(["http:", "  routers:", "    dsm-system-web:", "      rule: " + json.dumps(rule),
-        "      entryPoints: [web]", "      service: dsm-system", "    dsm-system-secure:",
-        "      rule: " + json.dumps(rule), "      entryPoints: [websecure]", "      service: dsm-system",
-        "      tls:", "        certResolver: " + setting_get("traefik_cert_resolver", "letsencrypt"),
-        "  services:", "    dsm-system:", "      loadBalancer:", "        servers:",
-        "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]) + "\n"
-    await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", config)
     zone, records = await vas_find_zone(host)
     cname = [r for r in records if _public_dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() == "CNAME"]
     conflicts = [r for r in records if _public_dns_record_fqdn(r, zone) == host and str(r.get("type") or "").upper() != "CNAME"]
