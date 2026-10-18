@@ -426,7 +426,7 @@ async def provisioning_site_save(request: Request, session=Depends(require_csrf)
         if net.version!=4: raise ValueError()
         octet=int(p.get("management_octet") or next_management_octet())
         if octet<1 or octet>254: raise ValueError()
-        site=save_site(name,str(net),octet,p.get("public_ip") or "",p.get("ssh_user") or "")
+        site=save_site(name,str(net),octet,p.get("public_ip") or "",p.get("ssh_user") or "", p.get("proxy_dns_hostname"), p.get("dns_auto") if "dns_auto" in p else None)
     except Exception as exc:
         raise HTTPException(400,"Neplatná nebo kolidující lokalita: "+str(exc))
     return {"site":site}
