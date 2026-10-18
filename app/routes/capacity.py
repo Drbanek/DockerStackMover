@@ -154,6 +154,44 @@ async def firewall_rollback(endpoint_id:int,txid:str,session=Depends(require_csr
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     return await agent_firewall(endpoint_id,"POST",suffix="/rollback/"+txid)
 
+async def proxy_public_readiness(endpoint_id, settings):
+    site_name = str(settings.get("site") or "").strip().upper()
+    site = get_site(site_name) or {}
+    configured = str(site.get("public_ip") or settings.get("public_ip") or "").strip()
+    detected = ""
+    try:
+        cmd = "wget -qO- -T 5 https://api.ipify.org || wget -qO- -T 5 https://ifconfig.me/ip"
+        detected = (await _run_proxy_helper(endpoint_id, cmd, host_network=True)).strip()
+    except Exception:
+        pass
+    public_ok = bool(detected and re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", detected))
+    if public_ok and configured and detected != configured:
+        public_ok = False
+    public_message = ("Detected " + detected) if detected else "Public IPv4 could not be detected"
+    if detected and configured and detected != configured:
+        public_message = "Detected " + detected + ", configured " + configured
+    elif detected and not configured:
+        public_message = "Detected " + detected + " · save it to site configuration"
+    dns_auto = bool(site.get("dns_auto", 1))
+    anchor = str(site.get("proxy_dns_hostname") or "").strip().lower().rstrip(".")
+    if not dns_auto:
+        dns = {"ok": True, "message": "Automatic DNS disabled"}
+    elif not vas_hosting_enabled():
+        dns = {"ok": False, "message": "Váš Hosting provider is not configured"}
+    elif not anchor:
+        dns = {"ok": False, "message": "Proxy DNS hostname is not configured"}
+    elif not detected:
+        dns = {"ok": False, "message": "Public IP is not known"}
+    else:
+        try:
+            zone, records = await vas_find_zone(anchor)
+            matches = [r for r in records if _dns_record_fqdn(r, zone) == anchor and str(r.get("type") or "").upper() == "A"]
+            values = sorted({str(r.get("content") or "").strip() for r in matches})
+            dns = {"ok": values == [detected], "message": anchor + " → " + (", ".join(values) if values else "missing") + " · expected " + detected}
+        except Exception as exc:
+            dns = {"ok": False, "message": str(exc)}
+    return {"public_ip": {"ok": public_ok and bool(configured), "message": public_message, "detected": detected, "configured": configured}, "dns": dns}
+
 async def node_readiness(endpoint):
     """Return an actionable readiness report for any Portainer endpoint."""
     endpoint_id = int(endpoint["Id"])
@@ -171,6 +209,8 @@ async def node_readiness(endpoint):
         "migration": {"ok": bool(settings.get("migration_enabled")), "message": "Enabled" if settings.get("migration_enabled") else "Disabled"},
         "firewall": {"ok": False, "message": "Not verified"},
         "proxy": {"ok": False, "message": "Traefik not verified"},
+        "public_ip": {"ok": False, "message": "Public IP not verified"},
+        "dns": {"ok": False, "message": "DNS not verified"},
     }
     try:
         info = await docker_request(endpoint_id, "GET", "/info")
@@ -188,6 +228,13 @@ async def node_readiness(endpoint):
                 checks["proxy"] = {"ok": False, "message": "Traefik container not found"}
         except Exception as exc:
             checks["proxy"] = {"ok": False, "message": str(exc)}
+        try:
+            pub = await proxy_public_readiness(endpoint_id, settings)
+            checks["public_ip"] = pub["public_ip"]
+            checks["dns"] = pub["dns"]
+        except Exception as exc:
+            checks["public_ip"] = {"ok": False, "message": str(exc)}
+            checks["dns"] = {"ok": False, "message": str(exc)}
     if settings.get("agent_url") and settings.get("agent_token"):
         try:
             data_disk, system_disk = await agent_disk_usage(endpoint_id)
@@ -201,7 +248,7 @@ async def node_readiness(endpoint):
     if role == "NODE":
         required = ("docker","host_ip","capacity_agent","data_disk","migration","firewall")
     elif role == "PROXY":
-        required = ("docker","host_ip","proxy")
+        required = ("docker","host_ip","proxy","public_ip","dns")
     elif role == "PORTAINER":
         required = ("docker","host_ip")
     else:
