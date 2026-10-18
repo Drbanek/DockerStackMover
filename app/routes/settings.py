@@ -49,6 +49,9 @@ async def app_settings(session=Depends(require_permission("admin"))):
 async def app_settings_save(request: Request, session=Depends(require_csrf)):
     if "admin" not in user_permissions(session.get("user","")): raise HTTPException(403,"Permission denied")
     p = await request.json()
+    requested_mgmt_mode = str(p.get("management_access_mode") or setting_get("management_access_mode","ip")).strip().lower()
+    if "management_access_mode" in p and requested_mgmt_mode in ("country","ip_country"):
+        raise HTTPException(501, "Omezení podle země zatím není aktivní. Použij IP / CIDR; GeoIP enforcement bude doplněn samostatně.")
     if "portainer_url" in p: setting_set("portainer_url", str(p["portainer_url"]).strip().rstrip("/"))
     if p.get("portainer_token"): setting_set("portainer_token", str(p["portainer_token"]).strip(), True)
     if p.get("vas_hosting_api_key"): setting_set("vas_hosting_api_key", str(p["vas_hosting_api_key"]).strip(), True)
@@ -68,10 +71,13 @@ async def app_settings_save(request: Request, session=Depends(require_csrf)):
             values.append(raw)
         setting_set("management_access_sources","\n".join(values))
     if "management_access_countries" in p:
-        countries=sorted({x.strip().upper() for x in re.split(r"[,\s]+",str(p["management_access_countries"] or "")) if x.strip()})
+        countries=sorted({x.strip().upper() for x in re.split(r"[,\\s]+",str(p["management_access_countries"] or "")) if x.strip()})
         if any(not re.fullmatch(r"[A-Z]{2}",x) for x in countries): raise HTTPException(400,"Země musí být ISO kód, např. CZ.")
         setting_set("management_access_countries",",".join(countries))
-    return {"ok": True, "restart_required": False}
+    firewall_applied = False
+    if any(k in p for k in ("management_access_mode","management_access_sources","management_access_countries")):
+        firewall_applied = await _apply_management_access_policy()
+    return {"ok": True, "restart_required": False, "management_firewall_applied": firewall_applied}
 
 @app.put("/api/account/password")
 async def account_password(request: Request, session=Depends(require_csrf)):
@@ -149,6 +155,47 @@ def _public_dns_record_fqdn(record, zone):
 def _public_remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose="route"):
     from .. import core
     return core._remember_managed_dns(stack_name, route_id, host, zone, record, content, purpose)
+
+async def _apply_management_access_policy():
+    """Apply DSM public UI IP policy directly to the MAIN Traefik route."""
+    if setting_get("dsm_public_enabled", "0") != "1":
+        return False
+    mode = setting_get("management_access_mode", "ip").strip().lower()
+    if mode in ("country", "ip_country"):
+        raise HTTPException(501, "GeoIP enforcement zatím není aktivní; použij IP / CIDR.")
+    sources = [x.strip() for x in setting_get("management_access_sources", "").splitlines() if x.strip()]
+    if mode == "ip" and not sources:
+        raise HTTPException(400, "Pro režim IP / CIDR musí být zadaná alespoň jedna povolená adresa.")
+    if mode == "any":
+        sources = ["0.0.0.0/0", "::/0"]
+
+    main = next((x for x in get_sites() if int(x.get("management_octet") or 0) == 1), None)
+    if not main:
+        raise HTTPException(409, "MAIN lokalita nebyla nalezena.")
+    settings = get_endpoint_settings()
+    control = next((x for x in settings.values() if str(x.get("site") or "").upper() == str(main.get("name") or "").upper() and str(x.get("role") or "").upper() == "CONTROL"), None)
+    backend_ip = str((control or {}).get("lan_ip") or (control or {}).get("host_ip") or setting_get("wg_hub_lan_ip", "") or "").strip()
+    if not backend_ip and main.get("lan_cidr"):
+        backend_ip = str(ipaddress.ip_address(str(main["lan_cidr"]).split("/")[0]) + 9)
+    if not backend_ip:
+        raise HTTPException(409, "CONTROL/MGMT LAN IP není známá.")
+    host = setting_get("dsm_public_hostname", "dsm.lukas.cloud").strip().lower().rstrip(".")
+    port = int(setting_get("dsm_public_backend_port", "8082") or 8082)
+    from .proxy import _site_proxy, _write_dynamic_file
+    proxy_id = _site_proxy(main["name"])
+    rule = "Host(" + chr(96) + host + chr(96) + ")"
+    lines = ["http:", "  routers:", "    dsm-system-web:", "      rule: " + json.dumps(rule),
+        "      entryPoints: [web]", "      service: dsm-system", "      middlewares: [dsm-management-access]",
+        "    dsm-system-secure:", "      rule: " + json.dumps(rule), "      entryPoints: [websecure]",
+        "      service: dsm-system", "      middlewares: [dsm-management-access]", "      tls:",
+        "        certResolver: " + setting_get("traefik_cert_resolver", "letsencrypt"),
+        "  middlewares:", "    dsm-management-access:", "      ipAllowList:", "        sourceRange:"]
+    lines += ["          - " + json.dumps(x) for x in sources]
+    lines += ["  services:", "    dsm-system:", "      loadBalancer:", "        servers:",
+              "          - url: " + json.dumps("http://" + backend_ip + ":" + str(port))]
+    await _write_dynamic_file(proxy_id, "dsm-system-ui.yml", "\\n".join(lines) + "\\n")
+    return True
+
 
 @app.get("/api/system/public-access")
 async def system_public_access_status(session=Depends(require_permission("admin"))):
@@ -243,5 +290,6 @@ log:
     else:
         record = await vas_create_record(zone, host, "CNAME", anchor, 60)
     _public_remember_managed_dns("__DSM_SYSTEM__", None, host, zone, record, anchor, "system")
-    setting_set("dsm_public_enabled", "1"); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
+    setting_set("dsm_public_enabled", "1")
+    await _apply_management_access_policy(); setting_set("dsm_public_hostname", host); setting_set("dsm_public_backend_port", str(port))
     return {"ok": True, "hostname": host, "target": anchor, "backend": backend_ip + ":" + str(port)}
