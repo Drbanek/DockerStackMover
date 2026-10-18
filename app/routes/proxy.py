@@ -536,7 +536,10 @@ async def proxy_route_delete(stack_id: int, route_id: int, session=Depends(requi
         site = get_endpoint_settings().get(int(detail["stack"]["endpoint_id"]), {}).get("site")
         await remove_stack_proxy(detail["stack"]["name"], site)
         result = {"configured": False}
-    return {"ok": True, "proxy": result, "dns": dns}\n\n\n@app.put("/api/stacks/{stack_id}/proxy")
+    return {"ok": True, "proxy": result, "dns": dns}
+
+
+@app.put("/api/stacks/{stack_id}/proxy")
 async def proxy_configure(stack_id: int, request: Request, session=Depends(require_csrf)):
     # Backward-compatible endpoint: now appends a route instead of replacing the stack domain.
     return await proxy_route_create(stack_id, request, session)
