@@ -420,3 +420,19 @@ async function saveManagementAccess(){
  state.textContent="Ukládám politiku…";
  try{const r=await fetch("/api/app-settings",{method:"PUT",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());state.textContent="✓ Politika uložena · aplikace firewallu bude provedena bezpečnou transakcí při přípravě CONTROL serveru."}catch(e){state.textContent="✕ "+e.message}
 }
+
+async function loadDsmPublicAccess(){
+ const state=document.getElementById("dsmPublicState");if(!state)return;
+ try{const d=await getJson("/api/system/public-access");document.getElementById("dsmPublicHostname").value=d.hostname||"dsm.lukas.cloud";document.getElementById("dsmPublicPort").value=d.backend_port||8082;
+  const badge=document.getElementById("dsmPublicBadge");badge.className="badge "+(d.enabled?"running":"");badge.textContent=d.enabled?"ACTIVE":"HTTPS";
+  state.textContent=d.enabled?"Aktivní: https://"+d.hostname+" → "+(d.backend_ip||"MGMT")+":"+d.backend_port:"Veřejné směrování DSM zatím není aktivní."
+ }catch(e){state.textContent="✕ "+String(e.message||e)}
+}
+async function enableDsmPublicAccess(){
+ const state=document.getElementById("dsmPublicState"),host=document.getElementById("dsmPublicHostname").value.trim(),port=Number(document.getElementById("dsmPublicPort").value)||8082;
+ if(!confirm("Publikovat DSM jako https://"+host+" přes MAIN PROXY?"))return;
+ state.textContent="Nastavuji Traefik, DNS a ověřuji MGMT backend…";
+ try{const r=await fetch("/api/system/public-access",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":csrfToken},body:JSON.stringify({hostname:host,backend_port:port})});const raw=await r.text();let d={};try{d=JSON.parse(raw)}catch(_){}
+  if(!r.ok)throw new Error(d.detail||raw);state.textContent="✓ https://"+d.hostname+" → "+d.backend+" · DNS CNAME → "+d.target;await loadDsmPublicAccess()
+ }catch(e){state.textContent="✕ "+String(e.message||e)}
+}
