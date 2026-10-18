@@ -507,7 +507,12 @@ async def proxy_route_create(stack_id: int, request: Request, session=Depends(re
             raise
         refreshed = await build_detail(stack_id)
         result = await sync_stack_proxy(refreshed, endpoint_id)
-        return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": result}
+        created_route = next((r for r in get_stack_proxy_routes(detail["stack"]["name"]) if r["host"] == host), None)
+        dns = {"managed": False, "status": "disabled"}
+        if created_route and vas_hosting_enabled():
+            site = (get_endpoint_settings().get(endpoint_id, {}).get("site") or "").strip().upper()
+            dns = await ensure_route_dns(detail["stack"]["name"], created_route["id"], host, site)
+        return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": result, "dns": dns}
     except HTTPException: raise
     except Exception as exc: raise HTTPException(502, "Přidání směrování selhalo: " + str(exc))
 
@@ -518,7 +523,11 @@ async def proxy_route_delete(stack_id: int, route_id: int, session=Depends(requi
         raise HTTPException(403, "Permission denied")
     detail = await build_detail(stack_id)
     routes = get_stack_proxy_routes(detail["stack"]["name"])
-    if not any(int(r["id"]) == int(route_id) for r in routes): raise HTTPException(404, "Směrování nenalezeno.")
+    route = next((r for r in routes if int(r["id"]) == int(route_id)), None)
+    if not route: raise HTTPException(404, "Směrování nenalezeno.")
+    # DNS first: if an owned record was changed outside DSM, refuse deletion
+    # rather than deleting either the DNS record or the application route blindly.
+    dns = await delete_route_dns(detail["stack"]["name"], route_id, route["host"]) if vas_hosting_enabled() else {"managed": False, "status": "disabled"}
     delete_stack_proxy_route(detail["stack"]["name"], route_id)
     refreshed = await build_detail(stack_id)
     if refreshed.get("domains"):
@@ -527,10 +536,7 @@ async def proxy_route_delete(stack_id: int, route_id: int, session=Depends(requi
         site = get_endpoint_settings().get(int(detail["stack"]["endpoint_id"]), {}).get("site")
         await remove_stack_proxy(detail["stack"]["name"], site)
         result = {"configured": False}
-    return {"ok": True, "proxy": result}
-
-
-@app.put("/api/stacks/{stack_id}/proxy")
+    return {"ok": True, "proxy": result, "dns": dns}\n\n\n@app.put("/api/stacks/{stack_id}/proxy")
 async def proxy_configure(stack_id: int, request: Request, session=Depends(require_csrf)):
     # Backward-compatible endpoint: now appends a route instead of replacing the stack domain.
     return await proxy_route_create(stack_id, request, session)
