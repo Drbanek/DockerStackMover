@@ -159,15 +159,23 @@ async def proxy_public_readiness(endpoint_id, settings):
     site = get_site(site_name) or {}
     configured = str(site.get("public_ip") or settings.get("public_ip") or "").strip()
     detected = ""
+    detect_error = ""
     try:
+        from .proxy import _run_proxy_helper
         cmd = "wget -qO- -T 5 https://api.ipify.org || wget -qO- -T 5 https://ifconfig.me/ip"
         detected = (await _run_proxy_helper(endpoint_id, cmd, host_network=True)).strip()
-    except Exception:
-        pass
-    public_ok = bool(detected and re.fullmatch(r"(?:[0-9]{1,3}\.){3}[0-9]{1,3}", detected))
+        try:
+            parsed = ipaddress.ip_address(detected)
+            if parsed.version != 4:
+                detected = ""
+        except ValueError:
+            detected = ""
+    except Exception as exc:
+        detect_error = str(exc)
+    public_ok = bool(detected)
     if public_ok and configured and detected != configured:
         public_ok = False
-    public_message = ("Detected " + detected) if detected else "Public IPv4 could not be detected"
+    public_message = ("Detected " + detected) if detected else ("Public IPv4 could not be detected" + (": " + detect_error if detect_error else ""))
     if detected and configured and detected != configured:
         public_message = "Detected " + detected + ", configured " + configured
     elif detected and not configured:
