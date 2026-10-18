@@ -345,7 +345,19 @@ async function loadProvisionSites(){
  const sel=document.getElementById("provSiteSelect");if(!sel)return;
  try{const d=await getJson("/api/provisioning/sites");provisionSites=d.sites||[];sel.innerHTML=provisionSites.map(s=>"<option value='"+esc(s.name)+"'>"+esc(s.name)+" · "+esc(s.lan_cidr)+" · 10.200."+s.management_octet+".0/24</option>").join("");if(!provisionSites.length)sel.innerHTML="<option value=''>Nejdřív založ lokalitu</option>";document.getElementById("siteMgmt").value=d.next_management_octet||2;selectProvisionSite()}catch(e){sel.innerHTML="<option>Lokality nelze načíst</option>"}
 }
-function toggleSiteEditor(){const e=document.getElementById("provSiteEditor");e.style.display=e.style.display==="none"?"block":"none";if(e.style.display==="block"){const name=document.getElementById("siteName").value.trim().toLowerCase();if(name&&!document.getElementById("siteProxyDns").value)document.getElementById("siteProxyDns").value="proxy-"+name+".lukas.cloud"}}
+function fillProvisionSiteEditor(s){
+ if(!s)return;
+ document.getElementById("siteName").value=s.name||"";
+ document.getElementById("siteLan").value=s.lan_cidr||"";
+ document.getElementById("siteMgmt").value=s.management_octet||"";
+ document.getElementById("sitePublicIp").value=s.public_ip||"";
+ document.getElementById("siteProxyDns").value=s.proxy_dns_hostname||("proxy-"+String(s.name||"").toLowerCase()+".lukas.cloud");
+ document.getElementById("siteDnsAuto").value=s.dns_auto===false||s.dns_auto===0?"0":"1";
+ document.getElementById("siteSshUser").value=s.ssh_user||"lukas";
+}
+function editProvisionSite(){const n=document.getElementById("provSiteSelect")?.value,s=provisionSites.find(x=>x.name===n);if(!s){alert("Vyber lokalitu.");return}fillProvisionSiteEditor(s);document.getElementById("provSiteEditor").style.display="block"}
+function newProvisionSite(){document.getElementById("siteName").value="";document.getElementById("siteLan").value="";document.getElementById("sitePublicIp").value="";document.getElementById("siteProxyDns").value="";document.getElementById("siteDnsAuto").value="1";document.getElementById("siteSshUser").value="lukas";document.getElementById("provSiteEditor").style.display="block"}
+function toggleSiteEditor(){const e=document.getElementById("provSiteEditor");e.style.display=e.style.display==="none"?"block":"none"}
 function selectProvisionSite(){const n=document.getElementById("provSiteSelect")?.value,s=provisionSites.find(x=>x.name===n);if(!s)return;document.getElementById("provSite").value=s.name;document.getElementById("provHubUser").value=(provisionSites.find(x=>x.management_octet===1)||{}).ssh_user||"";document.getElementById("provSelected").innerHTML=""}
 async function saveProvisionSite(){
  const p={name:document.getElementById("siteName").value,lan_cidr:document.getElementById("siteLan").value,management_octet:Number(document.getElementById("siteMgmt").value),public_ip:document.getElementById("sitePublicIp").value,proxy_dns_hostname:document.getElementById("siteProxyDns").value,dns_auto:document.getElementById("siteDnsAuto").value==="1",ssh_user:document.getElementById("siteSshUser").value};
