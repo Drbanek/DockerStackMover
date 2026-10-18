@@ -493,6 +493,24 @@ async def proxy_route_create(stack_id: int, request: Request, session=Depends(re
         raise HTTPException(400, "Služba " + service + ":" + str(container_port) + " nebyla ve stacku nalezena.")
     backend_port = _backend_port_for_stack(detail["stack"]["name"], service, container_port)
     endpoint_id = int(detail["stack"]["endpoint_id"])
+    settings_map = get_endpoint_settings()
+    site_name = (settings_map.get(endpoint_id, {}).get("site") or "").strip().upper()
+    try:
+        proxy_id = _site_proxy(site_name)
+        endpoints = await get_endpoints()
+        proxy_endpoint = next((e for e in endpoints if int(e.get("Id")) == int(proxy_id)), None)
+        if not proxy_endpoint:
+            raise RuntimeError("PROXY endpoint nebyl nalezen.")
+        from .capacity import node_readiness
+        proxy_ready = await node_readiness(proxy_endpoint)
+        if not proxy_ready.get("ready"):
+            failed = [k + ": " + str((proxy_ready.get("checks", {}).get(k) or {}).get("message") or "")
+                      for k in proxy_ready.get("required_checks", []) if not (proxy_ready.get("checks", {}).get(k) or {}).get("ok")]
+            raise HTTPException(409, "PROXY lokalita není připravena pro publikování: " + " · ".join(failed))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, "PROXY readiness nelze ověřit: " + str(exc))
     containers = (await docker_get(endpoint_id, "/containers/json", params={"all":"1"})).json()
     for container in containers:
         if (container.get("Labels") or {}).get("com.docker.compose.project") == detail["stack"]["name"]: continue
