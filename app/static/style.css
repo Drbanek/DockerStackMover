@@ -259,3 +259,21 @@ input:focus,select:focus{outline:2px solid #2563eb55;outline-offset:1px;border-c
 
 .certInfo{font-size:12px;margin-top:4px;color:#94a3b8}.certInfo button{padding:2px 8px;font-size:12px}
 .certOk{color:#6ee7b7}.certWarn{color:#fde68a}.certBad{color:#fca5a5}
+
+.certPending{color:#93c5fd}
+#tab-dashboard > .dashboardCertsCard,#tab-dashboard > .dashboardStacksCard{grid-column:1/-1}
+@media(max-width:900px){#tab-dashboard > .dashboardCertsCard,#tab-dashboard > .dashboardStacksCard{grid-column:auto}}
+.certSummary{margin-bottom:10px;font-size:13px}
+.certTable td{font-size:13px;padding:8px 12px;border-top:1px solid #1e293b;vertical-align:top}
+.certTable a{color:#60a5fa;text-decoration:none}
+.certTable tr.cert-bad td:first-child{border-left:3px solid #ef4444}
+.certTable tr.cert-warn td:first-child{border-left:3px solid #f59e0b}
+.certTable tr.cert-ok td:first-child{border-left:3px solid #10b981}
+.certTable button{padding:3px 8px;font-size:12px;white-space:nowrap}
+.tableWrap{overflow-x:auto}
+.stackDomains .domain.cert-ok{box-shadow:inset 0 0 0 1px #10b981}
+.stackDomains .domain.cert-warn{box-shadow:inset 0 0 0 1px #f59e0b;color:#fde68a}
+.stackDomains .domain.cert-bad{box-shadow:inset 0 0 0 1px #ef4444;color:#fecaca}
+.stackDomains .domain.cert-pending{box-shadow:inset 0 0 0 1px #3b82f6}
+.stackSslLine{margin-top:8px;font-size:12px}
+.stackSsl{font-size:12px}

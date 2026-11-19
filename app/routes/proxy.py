@@ -312,6 +312,11 @@ TLS_TASKS = {}
 
 
 def _tls_task_set(host, state, message):
+    if state in ("ok", "error"):
+        try:
+            _ALL_CERTS_CACHE["data"] = None
+        except NameError:
+            pass
     TLS_TASKS[host] = {"state": state, "message": message,
                        "updated": datetime.now(timezone.utc).isoformat()}
 
@@ -457,25 +462,23 @@ def _parse_cert_dates(value):
     return None
 
 
-async def read_stack_certificates(detail, endpoint_id):
-    """Ask the site's PROXY which certificate Traefik serves for every stack host."""
-    hosts = []
-    for d in detail.get("domains") or []:
+async def read_proxy_certificates(proxy_id, hosts):
+    """Ask one PROXY which certificate Traefik serves for each host (SNI on 127.0.0.1:443)."""
+    clean = []
+    for h in hosts or []:
         try:
-            h = _clean_host(d.get("host"))
+            h = _clean_host(h)
         except Exception:
             continue
-        if h not in hosts:
-            hosts.append(h)
-    if not hosts:
+        if h not in clean:
+            clean.append(h)
+    if not clean:
         return []
-    site = (get_endpoint_settings().get(int(endpoint_id), {}).get("site") or "").strip().upper()
-    proxy_id = _site_proxy(site)
     parts = ['apk add --no-cache openssl >/dev/null 2>&1; : > /tmp/r']
-    for h in hosts:
+    for h in clean:
         parts.append(
             'echo "@@HOST=' + h + '" >> /tmp/r; '
-            'printf "" | openssl s_client -connect 127.0.0.1:443 -servername ' + h +
+            'printf "" | timeout 10 openssl s_client -connect 127.0.0.1:443 -servername ' + h +
             ' -verify_hostname ' + h + ' > /tmp/s 2>/dev/null || true; '
             'grep -m1 "Verify return code" /tmp/s >> /tmp/r || echo "Verify return code: none" >> /tmp/r; '
             'openssl x509 -in /tmp/s -noout -subject -issuer -startdate -enddate -dateopt iso_8601 >> /tmp/r 2>/dev/null || echo "NOCERT" >> /tmp/r'
@@ -514,6 +517,72 @@ async def read_stack_certificates(detail, endpoint_id):
         info["task"] = TLS_TASKS.get(host)
         result.append(info)
     return result
+
+
+async def read_stack_certificates(detail, endpoint_id):
+    hosts = [d.get("host") for d in detail.get("domains") or []]
+    site = (get_endpoint_settings().get(int(endpoint_id), {}).get("site") or "").strip().upper()
+    return await read_proxy_certificates(_site_proxy(site), hosts)
+
+
+_ALL_CERTS_CACHE = {"at": 0.0, "data": None}
+
+
+async def read_all_certificates(force=False):
+    """Certificates of every proxy domain across all migration-enabled stacks (cached 5 min)."""
+    from .general import build_detail
+    loop_now = asyncio.get_running_loop().time()
+    if not force and _ALL_CERTS_CACHE["data"] is not None and loop_now - _ALL_CERTS_CACHE["at"] < 300:
+        data = dict(_ALL_CERTS_CACHE["data"])
+        data["certs"] = [dict(c, task=TLS_TASKS.get(c["host"])) for c in data["certs"]]
+        return data
+    endpoints = await get_endpoints()
+    enabled = {int(e["Id"]): e for e in migration_endpoints(endpoints)}
+    settings = get_endpoint_settings()
+    owners = {}
+    by_proxy = {}
+    errors = []
+    for stack in await get_stacks():
+        endpoint_id = int(stack.get("EndpointId") or 0)
+        if endpoint_id not in enabled:
+            continue
+        try:
+            detail = await build_detail(int(stack["Id"]))
+        except Exception as exc:
+            errors.append(str(stack.get("Name")) + ": " + str(exc))
+            continue
+        hosts = [str(d.get("host") or "").strip().lower().rstrip(".") for d in detail.get("domains") or [] if d.get("host")]
+        if not hosts:
+            continue
+        site = (settings.get(endpoint_id, {}).get("site") or "").strip().upper()
+        try:
+            proxy_id = _site_proxy(site)
+        except Exception as exc:
+            errors.append(str(stack.get("Name")) + ": " + str(exc))
+            continue
+        for h in hosts:
+            owners[h] = {"stack_id": int(stack["Id"]), "stack": stack.get("Name"), "site": site,
+                         "endpoint": enabled[endpoint_id].get("Name")}
+            by_proxy.setdefault(proxy_id, [])
+            if h not in by_proxy[proxy_id]:
+                by_proxy[proxy_id].append(h)
+
+    async def one(proxy_id, hosts):
+        try:
+            return await read_proxy_certificates(proxy_id, hosts)
+        except Exception as exc:
+            errors.append("PROXY " + str(proxy_id) + ": " + str(exc))
+            return [{"host": h, "valid": False, "error": str(exc)} for h in hosts]
+
+    certs = []
+    for chunk in await asyncio.gather(*(one(pid, hs) for pid, hs in by_proxy.items())):
+        for c in chunk:
+            c.update(owners.get(c["host"], {}))
+            certs.append(c)
+    certs.sort(key=lambda c: (bool(c.get("valid")), c.get("days_left") if c.get("days_left") is not None else 99999, c["host"]))
+    data = {"certs": certs, "errors": errors, "checked_at": datetime.now(timezone.utc).isoformat()}
+    _ALL_CERTS_CACHE.update(at=loop_now, data=data)
+    return data
 
 
 async def remove_stack_proxy(stack_name, site):
@@ -826,6 +895,14 @@ async def proxy_certs(stack_id: int, session=Depends(require_permission("dashboa
         if h and h not in known and h in TLS_TASKS:
             certs.append({"host": h, "valid": False, "task": TLS_TASKS[h]})
     return {"certs": certs}
+
+
+@app.get("/api/proxy/certs")
+async def proxy_certs_all(refresh: int = 0, session=Depends(require_permission("dashboard_read"))):
+    try:
+        return await read_all_certificates(force=bool(refresh))
+    except Exception as exc:
+        raise HTTPException(502, "Kontrola certifikátů selhala: " + str(exc))
 
 
 @app.post("/api/stacks/{stack_id}/proxy/certs/renew")
