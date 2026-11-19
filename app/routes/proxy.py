@@ -152,10 +152,26 @@ async def _remove_conflicting_dynamic_files(proxy_id, keep_filename, hosts):
     await _run_proxy_helper(proxy_id, cmd, binds=["/opt/traefik/dynamic:/dynamic"])
 
 
+TLS_PENDING_DNS = set()
+_BACKGROUND_TASKS = set()
+
+
+def _spawn(coro):
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
 async def sync_stack_proxy(detail, endpoint_id):
     domains = detail.get("domains") or []
     if not domains:
         return {"configured": False, "reason": "no proxy metadata"}
+    # Hosts still waiting for public DNS are not published yet: a Traefik router
+    # with certResolver would trigger an ACME attempt that fails on NXDOMAIN.
+    domains = [d for d in domains if str(d.get("host") or "").strip().lower().rstrip(".") not in TLS_PENDING_DNS]
+    if not domains:
+        return {"configured": False, "reason": "waiting for public DNS"}
     settings = get_endpoint_settings()
     node = settings.get(int(endpoint_id), {})
     site = (node.get("site") or "").strip().upper()
@@ -280,6 +296,224 @@ async def verify_stack_proxy_tls(detail, endpoint_id, timeout=120):
         pending = failed
         await asyncio.sleep(5)
     raise RuntimeError("SSL certificate timeout after " + str(timeout) + " s: " + ", ".join(pending))
+
+
+# ---------------------------------------------------------------------------
+# TLS certificate lifecycle for proxy routes
+#
+# Traefik asks Let's Encrypt for a certificate as soon as a router with a
+# certResolver appears. If the public DNS record does not exist yet, the
+# HTTP-01 validation fails (NXDOMAIN) and Traefik does not retry until it is
+# restarted. New routes therefore publish the Traefik router only after public
+# DNS resolves, and certificates can be inspected and re-issued from the UI.
+# ---------------------------------------------------------------------------
+
+TLS_TASKS = {}
+
+
+def _tls_task_set(host, state, message):
+    TLS_TASKS[host] = {"state": state, "message": message,
+                       "updated": datetime.now(timezone.utc).isoformat()}
+
+
+def _clean_host(host):
+    host = str(host or "").strip().lower().rstrip(".")
+    if not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host:
+        raise RuntimeError("Neplatná doména: " + host)
+    return host
+
+
+def _site_public_ip(site):
+    site = str(site or "").strip().upper()
+    meta = get_site(site) or {}
+    public_ip = str(meta.get("public_ip") or "").strip()
+    if public_ip:
+        return public_ip
+    settings = get_endpoint_settings()
+    for value in settings.values():
+        if (value.get("site") or "").strip().upper() == site and (value.get("role") or "").upper() == "PROXY":
+            return str(value.get("public_ip") or "").strip()
+    return ""
+
+
+def _resolve_public(host, resolver):
+    import dns.resolver
+    query = dns.resolver.Resolver(configure=False)
+    query.nameservers = [resolver]
+    query.timeout = 2
+    query.lifetime = 4
+    return sorted({str(answer) for answer in query.resolve(host, "A")})
+
+
+async def wait_public_dns(host, expected_ip="", timeout=900, on_progress=None):
+    """Wait until Cloudflare and Google resolve host (to expected_ip when known).
+
+    The first query is delayed so the public resolvers do not cache NXDOMAIN
+    for a record the DNS provider is still publishing.
+    """
+    await asyncio.sleep(20)
+    deadline = asyncio.get_running_loop().time() + timeout
+    pending = []
+    while asyncio.get_running_loop().time() < deadline:
+        pending = []
+        for resolver in ("1.1.1.1", "8.8.8.8"):
+            try:
+                answers = await asyncio.to_thread(_resolve_public, host, resolver)
+            except Exception as exc:
+                pending.append(resolver + ": " + type(exc).__name__)
+                continue
+            if not answers or (expected_ip and expected_ip not in answers):
+                pending.append(resolver + ": " + (",".join(answers) or "bez A záznamu"))
+        if not pending:
+            return True
+        if on_progress:
+            on_progress("Čekám na veřejné DNS · " + " · ".join(pending))
+        await asyncio.sleep(15)
+    raise RuntimeError("DNS pro " + host + " se do " + str(timeout) + " s neobjevilo: " + " · ".join(pending))
+
+
+async def publish_route_tls_task(stack_id, host):
+    """Background: wait for DNS, publish the Traefik router, verify the certificate."""
+    from .general import build_detail
+    host = _clean_host(host)
+    try:
+        detail = await build_detail(stack_id)
+        endpoint_id = int(detail["stack"]["endpoint_id"])
+        site = (get_endpoint_settings().get(endpoint_id, {}).get("site") or "").strip().upper()
+        expected = _site_public_ip(site)
+        _tls_task_set(host, "running", "Čekám na veřejné DNS" + (" → " + expected if expected else ""))
+        dns_ok = True
+        try:
+            await wait_public_dns(host, expected, on_progress=lambda m: _tls_task_set(host, "running", m))
+        except Exception as exc:
+            dns_ok = False
+            dns_error = str(exc)
+        _tls_task_set(host, "running", "Publikuji Traefik routu")
+        TLS_PENDING_DNS.discard(host)
+        detail = await build_detail(stack_id)
+        await sync_stack_proxy(detail, endpoint_id)
+        if not dns_ok:
+            _tls_task_set(host, "error", dns_error + " · Routa je publikovaná; po opravě DNS použij Vygenerovat nový certifikát.")
+            return
+        only = dict(detail)
+        only["domains"] = [d for d in (detail.get("domains") or []) if str(d.get("host") or "").lower() == host]
+        _tls_task_set(host, "running", "DNS OK · čekám na Let's Encrypt")
+        try:
+            await verify_stack_proxy_tls(only, endpoint_id, timeout=120)
+        except Exception:
+            # Traefik keeps a failed ACME attempt until restart; retry once cleanly.
+            _tls_task_set(host, "running", "První pokus selhal · restartuji Traefik a zkouším znovu")
+            await activate_stack_proxy_tls(only, endpoint_id)
+            await verify_stack_proxy_tls(only, endpoint_id, timeout=120)
+        _tls_task_set(host, "ok", "Certifikát vydán")
+    except Exception as exc:
+        TLS_PENDING_DNS.discard(host)
+        _tls_task_set(host, "error", str(exc))
+
+
+async def reissue_route_tls_task(stack_id, host):
+    """Background: drop the stored certificate for host from acme.json and let Traefik re-issue it."""
+    from .general import build_detail
+    host = _clean_host(host)
+    try:
+        detail = await build_detail(stack_id)
+        endpoint_id = int(detail["stack"]["endpoint_id"])
+        site = (get_endpoint_settings().get(endpoint_id, {}).get("site") or "").strip().upper()
+        proxy_id = _site_proxy(site)
+        only = dict(detail)
+        only["domains"] = [d for d in (detail.get("domains") or []) if str(d.get("host") or "").lower() == host]
+        if not only["domains"]:
+            raise RuntimeError("Doména " + host + " nepatří ke stacku.")
+        _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
+        jq_filter = (
+            'with_entries(if (.value|type)=="object" and (.value|has("Certificates")) then '
+            '.value.Certificates |= ((. // []) | map(select((.domain.main // "") != $h '
+            'and (((.domain.sans // []) | index($h)) == null)))) else . end)'
+        )
+        cmd = (
+            'apk add --no-cache jq >/dev/null 2>&1; '
+            'f=/letsencrypt/acme.json; test -s "$f"; '
+            'cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)"; '
+            'jq --arg h ' + json.dumps(host) + ' ' + json.dumps(jq_filter) + ' "$f" > /tmp/acme.new; '
+            'test -s /tmp/acme.new; cat /tmp/acme.new > "$f"; chmod 600 "$f"; '
+            'ls -1t /letsencrypt/acme.json.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f'
+        )
+        await _run_proxy_helper(proxy_id, cmd, binds=["/opt/traefik/letsencrypt:/letsencrypt"])
+        _tls_task_set(host, "running", "Restartuji Traefik a čekám na Let's Encrypt")
+        await activate_stack_proxy_tls(only, endpoint_id)
+        await verify_stack_proxy_tls(only, endpoint_id, timeout=150)
+        _tls_task_set(host, "ok", "Nový certifikát vydán")
+    except Exception as exc:
+        _tls_task_set(host, "error", str(exc))
+
+
+def _parse_cert_dates(value):
+    value = str(value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%SZ", "%b %d %H:%M:%S %Y GMT", "%b  %d %H:%M:%S %Y GMT"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    return None
+
+
+async def read_stack_certificates(detail, endpoint_id):
+    """Ask the site's PROXY which certificate Traefik serves for every stack host."""
+    hosts = []
+    for d in detail.get("domains") or []:
+        try:
+            h = _clean_host(d.get("host"))
+        except Exception:
+            continue
+        if h not in hosts:
+            hosts.append(h)
+    if not hosts:
+        return []
+    site = (get_endpoint_settings().get(int(endpoint_id), {}).get("site") or "").strip().upper()
+    proxy_id = _site_proxy(site)
+    parts = ['apk add --no-cache openssl >/dev/null 2>&1; : > /tmp/r']
+    for h in hosts:
+        parts.append(
+            'echo "@@HOST=' + h + '" >> /tmp/r; '
+            'printf "" | openssl s_client -connect 127.0.0.1:443 -servername ' + h +
+            ' -verify_hostname ' + h + ' > /tmp/s 2>/dev/null || true; '
+            'grep -m1 "Verify return code" /tmp/s >> /tmp/r || echo "Verify return code: none" >> /tmp/r; '
+            'openssl x509 -in /tmp/s -noout -subject -issuer -startdate -enddate -dateopt iso_8601 >> /tmp/r 2>/dev/null || echo "NOCERT" >> /tmp/r'
+        )
+    # Docker log framing inserts bytes between writes; emit the report as one base64 blob.
+    parts.append('printf "B64:%s:END" "$(base64 -w0 /tmp/r)"')
+    raw = await _run_proxy_helper(proxy_id, "; ".join(parts), host_network=True)
+    match = re.search(r"B64:([A-Za-z0-9+/=]*):END", raw or "")
+    if not match:
+        raise RuntimeError("PROXY nevrátil výsledek kontroly certifikátů.")
+    report = base64.b64decode(match.group(1)).decode("utf-8", "replace")
+    now = datetime.now(timezone.utc)
+    result = []
+    for block in report.split("@@HOST=")[1:]:
+        lines = block.splitlines()
+        host = lines[0].strip()
+        info = {"host": host, "valid": False, "issuer": "", "subject": "", "not_before": None, "not_after": None, "days_left": None, "verify": ""}
+        for line in lines[1:]:
+            line = line.strip()
+            if line.startswith("Verify return code:"):
+                info["verify"] = line.split(":", 1)[1].strip()
+            elif line.startswith("subject="):
+                info["subject"] = line[8:].strip()
+            elif line.startswith("issuer="):
+                info["issuer"] = line[7:].strip()
+            elif line.startswith("notBefore="):
+                dt = _parse_cert_dates(line[10:])
+                info["not_before"] = dt.isoformat() if dt else line[10:]
+            elif line.startswith("notAfter="):
+                dt = _parse_cert_dates(line[9:])
+                info["not_after"] = dt.isoformat() if dt else line[9:]
+                if dt:
+                    info["days_left"] = int((dt - now).total_seconds() // 86400)
+        info["valid"] = info["verify"].startswith("0 ")
+        info["default_cert"] = "TRAEFIK DEFAULT CERT" in info["subject"].upper()
+        info["task"] = TLS_TASKS.get(host)
+        result.append(info)
+    return result
 
 
 async def remove_stack_proxy(stack_name, site):
@@ -532,8 +766,10 @@ async def proxy_route_create(stack_id: int, request: Request, session=Depends(re
         except Exception as exc:
             if "UNIQUE" in str(exc).upper(): raise HTTPException(409, "Doména už je přiřazena jinému směrování.")
             raise
-        refreshed = await build_detail(stack_id)
-        result = await sync_stack_proxy(refreshed, endpoint_id)
+        # Order matters for Let's Encrypt: DNS first, Traefik router only after
+        # public DNS resolves (see publish_route_tls_task). Publishing the router
+        # first made Traefik fail HTTP-01 on NXDOMAIN and never retry.
+        TLS_PENDING_DNS.add(host)
         created_route = next((r for r in get_stack_proxy_routes(detail["stack"]["name"]) if r["host"] == host), None)
         dns = {"managed": False, "status": "not-configured"}
         if created_route:
@@ -542,7 +778,9 @@ async def proxy_route_create(stack_id: int, request: Request, session=Depends(re
                 dns = await ensure_route_dns(detail["stack"]["name"], created_route["id"], host, site)
             except Exception as exc:
                 dns = {"managed": False, "status": "error", "error": str(exc)}
-        return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": result, "dns": dns}
+        _tls_task_set(host, "running", "Čekám na veřejné DNS")
+        _spawn(publish_route_tls_task(stack_id, host))
+        return {"ok": True, "host": host, "service": service, "container_port": container_port, "backend_port": backend_port, "proxy": {"configured": False, "reason": "waiting for public DNS"}, "dns": dns, "tls": TLS_TASKS.get(host)}
     except HTTPException: raise
     except Exception as exc: raise HTTPException(502, "Přidání směrování selhalo: " + str(exc))
 
@@ -573,6 +811,45 @@ async def proxy_route_delete(stack_id: int, route_id: int, session=Depends(requi
 async def proxy_configure(stack_id: int, request: Request, session=Depends(require_csrf)):
     # Backward-compatible endpoint: now appends a route instead of replacing the stack domain.
     return await proxy_route_create(stack_id, request, session)
+
+@app.get("/api/stacks/{stack_id}/proxy/certs")
+async def proxy_certs(stack_id: int, session=Depends(require_permission("dashboard_read"))):
+    from .general import build_detail
+    detail = await build_detail(stack_id)
+    try:
+        certs = await read_stack_certificates(detail, int(detail["stack"]["endpoint_id"]))
+    except Exception as exc:
+        raise HTTPException(502, "Kontrola certifikátů selhala: " + str(exc))
+    known = {c["host"] for c in certs}
+    for d in detail.get("domains") or []:
+        h = str(d.get("host") or "").strip().lower().rstrip(".")
+        if h and h not in known and h in TLS_TASKS:
+            certs.append({"host": h, "valid": False, "task": TLS_TASKS[h]})
+    return {"certs": certs}
+
+
+@app.post("/api/stacks/{stack_id}/proxy/certs/renew")
+async def proxy_cert_renew(stack_id: int, request: Request, session=Depends(require_csrf)):
+    if "migrations" not in user_permissions(session.get("user", "")) and "admin" not in user_permissions(session.get("user", "")):
+        raise HTTPException(403, "Permission denied")
+    from .general import build_detail
+    payload = await request.json()
+    try:
+        host = _clean_host(payload.get("host"))
+    except Exception as exc:
+        raise HTTPException(400, str(exc))
+    detail = await build_detail(stack_id)
+    if host not in {str(d.get("host") or "").strip().lower().rstrip(".") for d in detail.get("domains") or []}:
+        raise HTTPException(404, "Doména nepatří k tomuto stacku.")
+    current = TLS_TASKS.get(host) or {}
+    if current.get("state") == "running":
+        raise HTTPException(409, "Pro " + host + " už běží: " + str(current.get("message") or ""))
+    if host in TLS_PENDING_DNS:
+        raise HTTPException(409, "Doména ještě čeká na veřejné DNS.")
+    _tls_task_set(host, "running", "Připravuji nové vydání certifikátu")
+    _spawn(reissue_route_tls_task(stack_id, host))
+    return {"ok": True, "host": host, "task": TLS_TASKS.get(host)}
+
 
 @app.post("/api/stacks/{stack_id}/proxy/sync")
 async def proxy_sync(stack_id: int, session=Depends(require_csrf)):
