@@ -1,4 +1,5 @@
 import base64
+import shlex
 import json
 import hashlib
 import re
@@ -429,27 +430,67 @@ async def reissue_route_tls_task(stack_id, host):
         only["domains"] = [d for d in (detail.get("domains") or []) if str(d.get("host") or "").lower() == host]
         if not only["domains"]:
             raise RuntimeError("Doména " + host + " nepatří ke stacku.")
-        _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
-        jq_filter = (
-            'with_entries(if (.value|type)=="object" and (.value|has("Certificates")) then '
-            '.value.Certificates |= ((. // []) | map(select((.domain.main // "") != $h '
-            'and (((.domain.sans // []) | index($h)) == null)))) else . end)'
-        )
-        cmd = (
-            'apk add --no-cache jq >/dev/null 2>&1; '
-            'f=/letsencrypt/acme.json; test -s "$f"; '
-            'cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)"; '
-            'jq --arg h ' + json.dumps(host) + ' ' + json.dumps(jq_filter) + ' "$f" > /tmp/acme.new; '
-            'test -s /tmp/acme.new; cat /tmp/acme.new > "$f"; chmod 600 "$f"; '
-            'ls -1t /letsencrypt/acme.json.bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f'
-        )
-        await _run_proxy_helper(proxy_id, cmd, binds=["/opt/traefik/letsencrypt:/letsencrypt"])
-        _tls_task_set(host, "running", "Restartuji Traefik a čekám na Let's Encrypt")
+        _tls_task_set(host, "running", "Hledám úložiště certifikátů Traefiku")
+        binds = await _traefik_storage_binds(proxy_id)
+        removed = 0
+        if binds:
+            _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
+            jq_filter = (
+                'with_entries(if (.value|type)=="object" and (.value|has("Certificates")) then '
+                '.value.Certificates |= ((. // []) | map(select((.domain.main // "") != $h '
+                'and (((.domain.sans // []) | index($h)) == null)))) else . end)'
+            )
+            count_filter = '[.. | objects | select(has("domain")) | select(.domain.main==$h or ((.domain.sans // []) | index($h)))] | length'
+            cmd = (
+                'apk add --no-cache jq >/dev/null 2>&1 || { echo "ERR: apk add jq selhal (PROXY bez přístupu k internetu?)"; exit 1; }; '
+                'n=0; '
+                'for f in $(find /storage -maxdepth 2 -type f -name "acme*.json" ! -name "*.bak-*" 2>/dev/null); do '
+                '  [ -s "$f" ] || continue; '
+                '  grep -q "Certificates" "$f" || continue; '
+                '  before=$(jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(count_filter) + ' "$f" 2>/dev/null || echo 0); '
+                '  [ "$before" = "0" ] && continue; '
+                '  cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" || { echo "ERR: záloha $f selhala"; exit 1; }; '
+                '  jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(jq_filter) + ' "$f" > /tmp/acme.new || { echo "ERR: jq nad $f selhal"; exit 1; }; '
+                '  [ -s /tmp/acme.new ] || { echo "ERR: prázdný výsledek pro $f"; exit 1; }; '
+                '  cat /tmp/acme.new > "$f"; chmod 600 "$f"; n=$((n+before)); '
+                '  ls -1t "$f".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f; '
+                'done; '
+                'printf "REMOVED:%s:END" "$n"'
+            )
+            out = await _run_proxy_helper(proxy_id, cmd, binds=binds)
+            m = re.search(r"REMOVED:(\d+):END", out or "")
+            removed = int(m.group(1)) if m else 0
+        msg = ("Odstraněn uložený certifikát" if removed else "Uložený certifikát nenalezen (nikdy nebyl vydán)") + " · "
+        _tls_task_set(host, "running", msg + "restartuji Traefik a čekám na Let's Encrypt")
         await activate_stack_proxy_tls(only, endpoint_id)
         await verify_stack_proxy_tls(only, endpoint_id, timeout=150)
         _tls_task_set(host, "ok", "Nový certifikát vydán")
     except Exception as exc:
         _tls_task_set(host, "error", str(exc))
+
+
+async def _traefik_storage_binds(proxy_id):
+    """Writable host directories mounted into the traefik container (where acme.json lives).
+
+    DSM-provisioned PROXY uses /opt/traefik/letsencrypt, but older/manual setups
+    keep acme.json elsewhere, so take the real mounts from the running container.
+    """
+    r = await docker_request(proxy_id, "GET", "/containers/traefik/json")
+    if r.status_code != 200:
+        raise RuntimeError("Kontejner traefik na PROXY nenalezen: HTTP " + str(r.status_code))
+    binds = []
+    for i, mnt in enumerate(r.json().get("Mounts") or []):
+        src = str(mnt.get("Source") or "")
+        dst = str(mnt.get("Destination") or "")
+        if not src or not mnt.get("RW", True):
+            continue
+        if src in ("/", "/var/run/docker.sock") or dst.endswith(".sock") or dst.startswith("/etc/traefik/dynamic"):
+            continue
+        if mnt.get("Type") == "bind" and src.endswith(".json"):
+            binds.append(src + ":/storage/f" + str(i) + "/" + src.rsplit("/", 1)[-1])
+        elif mnt.get("Type") in ("bind", "volume"):
+            binds.append(src + ":/storage/d" + str(i))
+    return binds
 
 
 def _parse_cert_dates(value):
