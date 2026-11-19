@@ -430,9 +430,15 @@ async def reissue_route_tls_task(stack_id, host):
         only["domains"] = [d for d in (detail.get("domains") or []) if str(d.get("host") or "").lower() == host]
         if not only["domains"]:
             raise RuntimeError("Doména " + host + " nepatří ke stacku.")
-        _tls_task_set(host, "running", "Hledám úložiště certifikátů Traefiku")
+        _tls_task_set(host, "running", "Zjišťuji aktuální certifikát a úložiště Traefiku")
+        try:
+            before_cert = (await read_proxy_certificates(proxy_id, [host]) or [{}])[0]
+        except Exception:
+            before_cert = {}
+        old_issued = before_cert.get("not_before") if before_cert.get("valid") and not before_cert.get("default_cert") else None
         binds = await _traefik_storage_binds(proxy_id)
         removed = 0
+        searched = []
         if binds:
             _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
             jq_filter = (
@@ -443,11 +449,12 @@ async def reissue_route_tls_task(stack_id, host):
             count_filter = '[.. | objects | select(has("domain")) | select(.domain.main==$h or ((.domain.sans // []) | index($h)))] | length'
             cmd = (
                 'apk add --no-cache jq >/dev/null 2>&1 || { echo "ERR: apk add jq selhal (PROXY bez přístupu k internetu?)"; exit 1; }; '
-                'n=0; '
+                'n=0; files=""; '
                 'for f in $(find /storage -maxdepth 2 -type f -name "acme*.json" ! -name "*.bak-*" 2>/dev/null); do '
                 '  [ -s "$f" ] || continue; '
                 '  grep -q "Certificates" "$f" || continue; '
                 '  before=$(jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(count_filter) + ' "$f" 2>/dev/null || echo 0); '
+                '  files="$files ${f#/storage/}=$before"; '
                 '  [ "$before" = "0" ] && continue; '
                 '  cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" || { echo "ERR: záloha $f selhala"; exit 1; }; '
                 '  jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(jq_filter) + ' "$f" > /tmp/acme.new || { echo "ERR: jq nad $f selhal"; exit 1; }; '
@@ -455,16 +462,26 @@ async def reissue_route_tls_task(stack_id, host):
                 '  cat /tmp/acme.new > "$f"; chmod 600 "$f"; n=$((n+before)); '
                 '  ls -1t "$f".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f; '
                 'done; '
-                'printf "REMOVED:%s:END" "$n"'
+                'printf "REMOVED:%s:FILES:%s:END" "$n" "$files"'
             )
             out = await _run_proxy_helper(proxy_id, cmd, binds=binds)
-            m = re.search(r"REMOVED:(\d+):END", out or "")
-            removed = int(m.group(1)) if m else 0
+            m = re.search(r"REMOVED:(\d+):FILES:([^:]*):END", out or "")
+            if not m:
+                raise RuntimeError("Úprava acme.json nevrátila výsledek: " + (out or "")[-300:])
+            removed = int(m.group(1))
+            searched = m.group(2).split()
         msg = ("Odstraněn uložený certifikát" if removed else "Uložený certifikát nenalezen (nikdy nebyl vydán)") + " · "
         _tls_task_set(host, "running", msg + "restartuji Traefik a čekám na Let's Encrypt")
+        where = (" · acme: " + ", ".join(searched)) if searched else (" · v připojených složkách Traefiku nebyl nalezen žádný acme*.json s certifikáty" if not removed else "")
+        if old_issued and not removed:
+            raise RuntimeError("Platný certifikát (vydán " + str(old_issued)[:16].replace("T", " ") + ") nebyl v úložišti Traefiku nalezen, nic se nesmazalo a Traefik by načetl stejný certifikát" + where)
         await activate_stack_proxy_tls(only, endpoint_id)
         await verify_stack_proxy_tls(only, endpoint_id, timeout=150)
-        _tls_task_set(host, "ok", "Nový certifikát vydán")
+        after_cert = (await read_proxy_certificates(proxy_id, [host]) or [{}])[0]
+        if old_issued and after_cert.get("not_before") == old_issued:
+            raise RuntimeError("Certifikát se neobnovil – Traefik po restartu servíruje původní certifikát (vydán " + str(old_issued)[:16].replace("T", " ") + ")" + where)
+        _tls_task_set(host, "ok", "Nový certifikát vydán " + str(after_cert.get("not_before") or "")[:16].replace("T", " ") +
+                      " · platný do " + str(after_cert.get("not_after") or "")[:10] + " (" + str(after_cert.get("days_left")) + " dní)" + where)
     except Exception as exc:
         _tls_task_set(host, "error", str(exc))
 
