@@ -436,40 +436,8 @@ async def reissue_route_tls_task(stack_id, host):
         except Exception:
             before_cert = {}
         old_issued = before_cert.get("not_before") if before_cert.get("valid") and not before_cert.get("default_cert") else None
-        binds = await _traefik_storage_binds(proxy_id)
-        removed = 0
-        searched = []
-        if binds:
-            _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
-            jq_filter = (
-                'with_entries(if (.value|type)=="object" and (.value|has("Certificates")) then '
-                '.value.Certificates |= ((. // []) | map(select((.domain.main // "") != $h '
-                'and (((.domain.sans // []) | index($h)) == null)))) else . end)'
-            )
-            count_filter = '[.. | objects | select(has("domain")) | select(.domain.main==$h or ((.domain.sans // []) | index($h)))] | length'
-            cmd = (
-                'timeout 60 apk add --no-cache jq >/dev/null 2>&1 || { echo "ERR: apk add jq selhal (PROXY bez přístupu k internetu?)"; exit 1; }; '
-                'n=0; files=""; '
-                'for f in $(find /storage -maxdepth 2 -type f -name "acme*.json" ! -name "*.bak-*" 2>/dev/null); do '
-                '  [ -s "$f" ] || continue; '
-                '  grep -q "Certificates" "$f" || continue; '
-                '  before=$(jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(count_filter) + ' "$f" 2>/dev/null || echo 0); '
-                '  files="$files ${f#/storage/}=$before"; '
-                '  [ "$before" = "0" ] && continue; '
-                '  cp -p "$f" "$f.bak-$(date +%Y%m%d%H%M%S)" || { echo "ERR: záloha $f selhala"; exit 1; }; '
-                '  jq --arg h ' + shlex.quote(host) + ' ' + shlex.quote(jq_filter) + ' "$f" > /tmp/acme.new || { echo "ERR: jq nad $f selhal"; exit 1; }; '
-                '  [ -s /tmp/acme.new ] || { echo "ERR: prázdný výsledek pro $f"; exit 1; }; '
-                '  cat /tmp/acme.new > "$f"; chmod 600 "$f"; n=$((n+before)); '
-                '  ls -1t "$f".bak-* 2>/dev/null | tail -n +6 | xargs -r rm -f; '
-                'done; '
-                'printf "REMOVED:%s:FILES:%s:END" "$n" "$files"'
-            )
-            out = await _run_proxy_helper(proxy_id, cmd, binds=binds, host_network=True, timeout=120)
-            m = re.search(r"REMOVED:(\d+):FILES:([^:]*):END", out or "")
-            if not m:
-                raise RuntimeError("Úprava acme.json nevrátila výsledek: " + (out or "")[-300:])
-            removed = int(m.group(1))
-            searched = m.group(2).split()
+        _tls_task_set(host, "running", "Odstraňuji uložený certifikát z acme.json (záloha acme.json.bak-*)")
+        removed, searched = await _remove_cert_from_traefik_storage(proxy_id, host)
         msg = ("Odstraněn uložený certifikát" if removed else "Uložený certifikát nenalezen (nikdy nebyl vydán)") + " · "
         _tls_task_set(host, "running", msg + "restartuji Traefik a čekám na Let's Encrypt")
         where = (" · acme: " + ", ".join(searched)) if searched else (" · v připojených složkách Traefiku nebyl nalezen žádný acme*.json s certifikáty" if not removed else "")
@@ -486,28 +454,92 @@ async def reissue_route_tls_task(stack_id, host):
         _tls_task_set(host, "error", str(exc))
 
 
-async def _traefik_storage_binds(proxy_id):
-    """Writable host directories mounted into the traefik container (where acme.json lives).
+def _acme_drop_host(data, host):
+    """Remove certificates for host from a Traefik acme.json structure. Returns count removed."""
+    removed = 0
+    if not isinstance(data, dict):
+        return 0
+    for resolver in data.values():
+        if not isinstance(resolver, dict) or "Certificates" not in resolver:
+            continue
+        kept = []
+        for cert in resolver.get("Certificates") or []:
+            domain = (cert or {}).get("domain") or {}
+            if domain.get("main") == host or host in (domain.get("sans") or []):
+                removed += 1
+            else:
+                kept.append(cert)
+        resolver["Certificates"] = kept
+    return removed
 
-    DSM-provisioned PROXY uses /opt/traefik/letsencrypt, but older/manual setups
-    keep acme.json elsewhere, so take the real mounts from the running container.
+
+async def _remove_cert_from_traefik_storage(proxy_id, host):
+    """Edit acme.json directly through the Docker archive API of the traefik container.
+
+    No helper container, no package install and no network access are needed:
+    the files are read as a tar stream, edited in Python and written back.
+    Returns (removed_count, ["path=count", ...]).
     """
+    import io
+    import tarfile
+    import time
+    import posixpath
     r = await docker_request(proxy_id, "GET", "/containers/traefik/json")
     if r.status_code != 200:
         raise RuntimeError("Kontejner traefik na PROXY nenalezen: HTTP " + str(r.status_code))
-    binds = []
-    for i, mnt in enumerate(r.json().get("Mounts") or []):
-        src = str(mnt.get("Source") or "")
+    dests = []
+    for mnt in r.json().get("Mounts") or []:
         dst = str(mnt.get("Destination") or "")
-        if not src or not mnt.get("RW", True):
+        if not dst or not mnt.get("RW", True) or dst.endswith(".sock") or dst.startswith("/etc/traefik/dynamic"):
             continue
-        if src in ("/", "/var/run/docker.sock") or dst.endswith(".sock") or dst.startswith("/etc/traefik/dynamic"):
+        dests.append(dst)
+    if not dests:
+        raise RuntimeError("Traefik nemá žádnou zapisovatelnou složku – nevím, kde je acme.json.")
+    removed_total = 0
+    searched = []
+    for dst in dests:
+        got = await docker_request(proxy_id, "GET", "/containers/traefik/archive", params={"path": dst}, timeout=60)
+        if got.status_code != 200:
+            searched.append(dst + "=nečitelné(HTTP " + str(got.status_code) + ")")
             continue
-        if mnt.get("Type") == "bind" and src.endswith(".json"):
-            binds.append(src + ":/storage/f" + str(i) + "/" + src.rsplit("/", 1)[-1])
-        elif mnt.get("Type") in ("bind", "volume"):
-            binds.append(src + ":/storage/d" + str(i))
-    return binds
+        base_dir = posixpath.dirname(dst.rstrip("/")) or "/"
+        try:
+            tar = tarfile.open(fileobj=io.BytesIO(got.content), mode="r:*")
+        except Exception as exc:
+            searched.append(dst + "=nečitelné(" + type(exc).__name__ + ")")
+            continue
+        for member in tar.getmembers():
+            name = posixpath.basename(member.name)
+            if not member.isfile() or not name.startswith("acme") or not name.endswith(".json") or member.size > 20 * 1024 * 1024:
+                continue
+            raw = tar.extractfile(member).read()
+            full = posixpath.join(base_dir, member.name)
+            try:
+                data = json.loads(raw.decode("utf-8")) if raw.strip() else None
+            except Exception:
+                searched.append(full + "=není JSON")
+                continue
+            count = _acme_drop_host(data, host) if data else 0
+            searched.append(full + "=" + str(count))
+            if not count:
+                continue
+            new_raw = json.dumps(data, indent=2).encode("utf-8")
+            stamp = time.strftime("%Y%m%d%H%M%S")
+            out = io.BytesIO()
+            with tarfile.open(fileobj=out, mode="w") as wt:
+                for fname, payload in ((name + ".bak-" + stamp, raw), (name, new_raw)):
+                    info = tarfile.TarInfo(fname)
+                    info.size = len(payload)
+                    info.mode = 0o600
+                    info.mtime = int(time.time())
+                    wt.addfile(info, io.BytesIO(payload))
+            target_dir = posixpath.dirname(full) or "/"
+            put = await docker_request(proxy_id, "PUT", "/containers/traefik/archive", params={"path": target_dir},
+                                       content=out.getvalue(), headers={"Content-Type": "application/x-tar"}, timeout=60)
+            if put.status_code != 200:
+                raise RuntimeError("Zápis " + full + " selhal: HTTP " + str(put.status_code) + " " + put.text[:200])
+            removed_total += count
+    return removed_total, searched
 
 
 def _parse_cert_dates(value):
