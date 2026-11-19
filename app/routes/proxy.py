@@ -25,7 +25,7 @@ def _site_proxy(site):
     return matches[0][0]
 
 
-async def _run_proxy_helper(proxy_id, cmd, env=None, host_network=False, binds=None):
+async def _run_proxy_helper(proxy_id, cmd, env=None, host_network=False, binds=None, timeout=30):
     """Run a short-lived helper through Portainer's stack API.
 
     Portainer performs the Docker create/start locally on the endpoint, avoiding
@@ -61,7 +61,7 @@ async def _run_proxy_helper(proxy_id, cmd, env=None, host_network=False, binds=N
     try:
         code = None
         logs_text = ""
-        for _ in range(60):
+        for _ in range(max(1, int(timeout * 2))):
             containers = (await docker_get(proxy_id, "/containers/json", params={"all": "1", "filters": json.dumps({"label": ["com.docker.compose.project=" + name]})})).json()
             if containers:
                 state = str(containers[0].get("State") or "").lower()
@@ -77,7 +77,7 @@ async def _run_proxy_helper(proxy_id, cmd, env=None, host_network=False, binds=N
                     break
             await asyncio.sleep(0.5)
         if code is None:
-            raise RuntimeError("PROXY helper timeout")
+            raise RuntimeError("PROXY helper timeout (" + str(timeout) + " s)")
         cid = containers[0].get("Id") if containers else None
         if cid:
             logs = await docker_request(proxy_id, "GET", "/containers/" + cid + "/logs",
@@ -448,7 +448,7 @@ async def reissue_route_tls_task(stack_id, host):
             )
             count_filter = '[.. | objects | select(has("domain")) | select(.domain.main==$h or ((.domain.sans // []) | index($h)))] | length'
             cmd = (
-                'apk add --no-cache jq >/dev/null 2>&1 || { echo "ERR: apk add jq selhal (PROXY bez přístupu k internetu?)"; exit 1; }; '
+                'timeout 60 apk add --no-cache jq >/dev/null 2>&1 || { echo "ERR: apk add jq selhal (PROXY bez přístupu k internetu?)"; exit 1; }; '
                 'n=0; files=""; '
                 'for f in $(find /storage -maxdepth 2 -type f -name "acme*.json" ! -name "*.bak-*" 2>/dev/null); do '
                 '  [ -s "$f" ] || continue; '
@@ -464,7 +464,7 @@ async def reissue_route_tls_task(stack_id, host):
                 'done; '
                 'printf "REMOVED:%s:FILES:%s:END" "$n" "$files"'
             )
-            out = await _run_proxy_helper(proxy_id, cmd, binds=binds)
+            out = await _run_proxy_helper(proxy_id, cmd, binds=binds, host_network=True, timeout=120)
             m = re.search(r"REMOVED:(\d+):FILES:([^:]*):END", out or "")
             if not m:
                 raise RuntimeError("Úprava acme.json nevrátila výsledek: " + (out or "")[-300:])
@@ -532,7 +532,7 @@ async def read_proxy_certificates(proxy_id, hosts):
             clean.append(h)
     if not clean:
         return []
-    parts = ['apk add --no-cache openssl >/dev/null 2>&1; : > /tmp/r']
+    parts = ['timeout 60 apk add --no-cache openssl >/dev/null 2>&1 || true; : > /tmp/r']
     for h in clean:
         parts.append(
             'echo "@@HOST=' + h + '" >> /tmp/r; '
@@ -543,7 +543,7 @@ async def read_proxy_certificates(proxy_id, hosts):
         )
     # Docker log framing inserts bytes between writes; emit the report as one base64 blob.
     parts.append('printf "B64:%s:END" "$(base64 -w0 /tmp/r)"')
-    raw = await _run_proxy_helper(proxy_id, "; ".join(parts), host_network=True)
+    raw = await _run_proxy_helper(proxy_id, "; ".join(parts), host_network=True, timeout=60 + 12 * len(clean))
     match = re.search(r"B64:([A-Za-z0-9+/=]*):END", raw or "")
     if not match:
         raise RuntimeError("PROXY nevrátil výsledek kontroly certifikátů.")
